@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/433887429.svg)](https://zenodo.org/badge/latestdoi/433887429)
+
 # bailey2021
 
 This is the GitHub repository that hosts the R package ```bailey2021```.
