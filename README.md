@@ -28,23 +28,3 @@ since 1950.
 
 - `Step5_ReviewerComments.Rmd`: Step 5 includes any supplementary analyses that were carried out
 to respond to reviewer comments.
-
-- \code{\link{estimate_sensitivity}} will run slidingwin, randwin, and SEM
-to generate all the code needed for analysis. Internally, this function
-is running:
-
-1. \code{\link{format_data}} is used to format the raw data (saved as
-Brood_info.csv in extdata). Only GT/BT are included, NAs in lay date are removed.
-Two methods of firstclutch are checked (calculated 30 days and observed).
-
-2. For each population, \code{\link{run_climwin}} is called. This firstly
-extract population relevant temperature data useing \code{\link{extract_temp_data}}.
-This function uses special data for Vlieland and Sicily, where not temperature
-grid cells were available. It then runs slidingwin and (if specified) randwin.
-
-3. If specified, \code{\link{run_SEM}} is called. This runs an SEM of the
-best window to remove effects of shared trends over time.
-
-- \code{\link{estimate_exposure}} will estimate the rate of climate change for
-each population 1950 - 2017. Note, this will exclude Vlieland and Sicily
-which do not use data from the ECA&D gridded dataset.
