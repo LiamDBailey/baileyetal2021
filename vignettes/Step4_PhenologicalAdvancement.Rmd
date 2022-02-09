@@ -1,0 +1,496 @@
+---
+title: "Analysis3_Vulnerability"
+author: "Liam D. Bailey"
+date: "18/10/2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, include = FALSE}
+
+#Load packages and set options
+options(scipen = 200)
+library(extrafont)
+library(tidyverse)
+library(glue)
+#For modelling
+library(lme4)
+#For tables
+library(knitr)
+library(kableExtra)
+#For spatial information
+library(sp)
+library(sf)
+library(rnaturalearth)
+library(raster)
+#For plotting
+library(patchwork)
+library(bailey2021)
+
+#Palette
+#Taken from https://colorbrewer2.org/ Dark2 palette
+#This palette is listed as colourblind friendly and can also be viewed in colourblind mode here
+#https://davidmathlogic.com/colorblind/#%23D95F02-%237570B3-%231B9E77
+friendly_palette <- c("#d95f02", "#7570b3", "#1b9e77")
+
+```
+
+#Overview:
+
+In this step, we estimate phenological advancement of each population from our measures of phenological sensitivity and exposure. We calculate the correlation between these two traits to understand how they may co-vary spatially. 
+
+We load our data that was prepared using `estimate_sensitivity` and `estimate_exposure` and compiled in the vignette Prepare_data.Rmd
+
+```{r}
+
+data("climate_sensitivity_and_exposure")
+
+head(climate_sensitivity_and_exposure)
+
+```
+
+Read in the laying date data and join to show the mean laying date for each population
+
+```{r}
+
+data("Population_summary")
+
+climate_sensitivity_and_exposure <- dplyr::left_join(climate_sensitivity_and_exposure, Population_summary, by = c("Pop_ID", "Species"))
+
+```
+
+We then create a measure of window mid point and duration. We will adjust window midpoint to be in Julian days (rather than days before June 1st) as this is more intuitive for readers.
+
+```{r}
+
+#Create a measure of midpoint which is in Julian days (i.e. values should get smaller as they get earlier)
+model_data <- climate_sensitivity_and_exposure %>%
+  #Turn midpoint into Julian date and create Pop_sp
+  dplyr::rowwise() %>% 
+  dplyr::mutate(WindowOpen_Julian = 151 - WindowOpen,
+                WindowClose_Julian = 151 - WindowClose,
+                Midpoint_Julian = 151 - mean(c(WindowOpen, WindowClose)),
+                Duration = WindowOpen - WindowClose,
+                Delay = mean_LD_Julian - Midpoint_Julian,
+                Pop_sp = paste(Pop_ID, Species, sep = "_"),
+                SEM_beta_abs = abs(SEM_beta),
+                vulnerability = SEM_beta_abs * CC_allyrs_beta) %>% 
+  dplyr::ungroup()
+
+```
+
+For our analysis we only want to include population/species combinations where a reliable window was detected. We will run our analysis with a conservative subset of the data: Only windows where PAICc is <= 0.05 (i.e. where the probability that the observed AICc result is drawn from the distribution of randomised data is <= 5%). We exclude 'short windows' (<= 14 days) as we consider these likely statistical artefacts.
+
+```{r}
+
+Consv <- filter(model_data, PAIC_dbl <= 0.05 & Duration > 14)
+
+message(paste0("The conservative subset includes ", nrow(Consv), " datapoints, or, ", round((nrow(Consv)/nrow(model_data))*100, 2), "% of the data \n \n"))
+
+message(paste0("The conservative subset includes ", length(unique(Consv$Pop_ID)), " populations, or, ", round(length(unique(Consv$Pop_ID))/length(unique(model_data$Pop_ID))*100, 2), "% of total populations"))
+
+```
+
+Remove populations without any temp data (Vlieland). Sicily already removed because it doesn't have a significant temperature window.
+
+```{r}
+
+Consv_CC <- Consv %>% 
+  dplyr::filter(!is.na(CC_allyrs_beta))
+
+```
+
+```{r}
+
+message(paste("There is a Pearson's correlation of: ", round(cor(Consv_CC$CC_allyrs_beta, Consv_CC$SEM_beta_abs), digits = 3), "\n between sensitivity and exposure"))
+
+ggplot(Consv_CC)+
+  geom_errorbar(aes(x = SEM_beta_abs, ymin = CC_allyrs_beta - CC_allyrs_SE, ymax = CC_allyrs_beta + CC_allyrs_SE))+
+  geom_errorbarh(aes(y = CC_allyrs_beta, xmin = SEM_beta - SEM_SE, xmax = SEM_beta_abs + SEM_SE))+
+  geom_point(aes(x = SEM_beta_abs, y = CC_allyrs_beta, shape = Species, fill = Habitat_Type), size = 3, stroke = 1)+
+  scale_shape_manual(values = c(21, 24))+
+  bailey2021:::theme_ubuntu(base_family = "sans")+
+  xlab("Phenological sensitivity (days advanced/C)")+
+  ylab("Climate change exposure \n (C/year; 1950 - 2017)")+
+  theme(axis.title = element_text(size = 14, family = "sans"),
+        axis.text = element_text(size = 12, family = "sans"))
+
+```
+
+Create a plot showing the phenological advancement of all pops (Fig 5)
+
+```{r}
+
+sense_limits <- c(0, 9)
+exp_limits <- c(0, 0.07)
+
+vulnerability_landscape <- expand.grid(sense = seq(sense_limits[1], sense_limits[2], length = 1000),
+                                       exp = seq(exp_limits[1], exp_limits[2], length = 1000)) %>% 
+  dplyr::mutate(vulnerability = sense * exp) %>% 
+  dplyr::mutate(vuln_fct = cut(vulnerability, breaks = seq(min(vulnerability), max(vulnerability), length.out = 15))) %>% 
+  dplyr::rowwise() %>% 
+  dplyr::mutate(value = gsub(pattern = "\\(|\\]", replacement = "", vuln_fct) %>% stringr::str_split(pattern = ",") %>% `[[`(1) %>% as.numeric() %>% mean()) %>% 
+  dplyr::filter(!is.na(vuln_fct))
+
+```
+
+```{r}
+
+my_palette <- colorRampPalette(colors = c("#000000", "#252525", "#525252", "#737373", "#969696", "#bdbdbd", "#d9d9d9", "#f0f0f0", "#ffffff"))
+
+Consv_CC$Habitat_Type <- forcats::fct_relevel(Consv_CC$Habitat_Type, "DEC", "MIX", "EVE")
+
+ggplot(Consv_CC)+
+  geom_tile(data = vulnerability_landscape, aes(x = sense, y = exp, fill = value),
+            colour = NA) +
+  geom_errorbar(aes(x = SEM_beta_abs, ymin = CC_allyrs_beta - CC_allyrs_SE, ymax = CC_allyrs_beta + CC_allyrs_SE),
+                width = 0)+
+  geom_errorbarh(aes(y = CC_allyrs_beta, xmin = SEM_beta_abs - SEM_SE, xmax = SEM_beta_abs + SEM_SE),
+                 height = 0)+
+  geom_point(aes(x = SEM_beta_abs, y = CC_allyrs_beta, shape = Species, colour = Habitat_Type), size = 3) +
+  scale_fill_gradient2(low = "#ffffff", high = "#000000", guide = "colourbar",
+                       name = "Phenological \n advancement \n (days advanced/year)") +
+  #New colour-blind friendly palette
+  scale_colour_manual(values = friendly_palette, name = "Habitat Type",
+                      labels = c("Deciduous", "Mixed", "Evergreen")) +
+  #Old palette
+  # scale_colour_manual(values = c("#CA3C25", "#33658A", "#4C9F70"), name = "Habitat Type",
+  #                     labels = c("Deciduous", "Mixed", "Evergreen")) +
+  scale_shape_manual(values = c(16, 17), labels = c("C. caeruleus", "P. major")) +
+  scale_x_continuous(limits = sense_limits, expand = c(0, 0)) +
+  scale_y_continuous(limits = exp_limits, expand = c(0, 0)) +
+  bailey2021:::theme_ubuntu(legend = "right", base_family = "sans") +
+  xlab(expression('Phenological sensitivity (days advanced/'*degree*'C)')) +
+  ylab(expression('Climate change exposure ('*degree*'C/year; 1950 - 2017)')) +
+  theme(axis.title = element_text(size = 14, family = "sans"),
+        axis.text = element_text(size = 12, family = "sans"),
+        legend.position = c(1.15, 0.5),
+        legend.box = "vertical",
+        legend.direction = "vertical",
+        legend.background = element_rect(fill = "white", colour = "black"),
+        plot.margin = margin(r = 175)) +
+  ## FIXME: CENTRE COLOURBAR IN LEGEND!
+  guides(fill = guide_colourbar(order = 1, title.hjust = 0.5),
+         colour = guide_legend(order = 2, title.hjust = 0.5),
+         shape = guide_legend(label.theme = element_text(family = "sans", face = "italic"),
+                              order = 3, title.hjust = 0.5))
+
+ggplot2::ggsave(filename = here::here("plots/Sensitivity_Exposure_Fig5.png"), width = 10, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Sensitivity_Exposure_Fig5.jpeg"), width = 10, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Sensitivity_Exposure_Fig5.pdf"), width = 10, height = 7)
+
+```
+
+Create a plot with point fill
+
+```{r}
+
+sense_limits <- c(0, 9)
+exp_limits <- c(0, 0.07)
+
+plot_data_fill <- Consv_CC
+
+ggplot(plot_data_fill)+
+  geom_errorbar(aes(x = SEM_beta_abs, ymin = CC_allyrs_beta - CC_allyrs_SE, ymax = CC_allyrs_beta + CC_allyrs_SE))+
+  geom_errorbarh(aes(y = CC_allyrs_beta, xmin = SEM_beta_abs - SEM_SE, xmax = SEM_beta_abs + SEM_SE))+
+  geom_point(aes(x = SEM_beta_abs, y = CC_allyrs_beta, shape = Species, fill = vulnerability), size = 3, stroke = 1)+
+  scale_fill_gradientn(colors = c("#ee4d5a",
+                                  "#f05c3c",
+                                  "#e96f16",
+                                  "#d98400",
+                                  "#c19900",
+                                  "#a1ac00",
+                                  "#73bd00",
+                                  "#00cb0d")) +
+  scale_shape_manual(values = c(21, 24))+
+  scale_x_continuous(limits = sense_limits, expand = c(0, 0)) +
+  scale_y_continuous(limits = exp_limits, expand = c(0, 0)) +
+  bailey2021:::theme_ubuntu(base_family = "sans")+
+  xlab("Phenological sensitivity (days/C)")+
+  ylab("Climate change exposure \n (C/year; 1950 - 2017)")+
+  theme(axis.title = element_text(size = 14, family = "sans"),
+        axis.text = element_text(size = 12, family = "sans"))
+
+```
+
+Carry out bootstrap to estimate correlation more robustly (Fig. S4)
+
+```{r}
+
+pearson_func <- function(data, index){
+  
+  sub_data <- data[index, ]
+  
+  return(round(cor(sub_data$CC_allyrs_beta, sub_data$SEM_beta_abs), digits = 3))
+  
+}
+
+set.seed(123)
+output <- boot::boot(data = Consv_CC, statistic = pearson_func, R = 5000, sim = "ordinary")
+
+plot_data <- dplyr::tibble(pearson = output$t) %>% 
+  dplyr::mutate(i = 1:n())
+
+ggplot(plot_data) +
+  geom_histogram(aes(x = pearson, y = (..count..)/sum(..count..)), bins = 50, fill = "grey75", colour = "black") +
+  geom_vline(xintercept = median(plot_data$pearson), lty = 2) +
+  geom_text(aes(x = median(plot_data$pearson) + 0.05, y = 0.075, label = round(median(plot_data$pearson), 2))) +
+  labs(x = "Pearson's correlation coefficient (r)", y = "Proportion") +
+  theme_classic() +
+  theme(axis.title.x = element_text(size = 12, margin = margin(t = 10)),
+        axis.title.y = element_text(size = 12, margin = margin(r = 10)))
+
+ggplot2::ggsave(filename = here::here("plots/Correlation_Bootstrap_FigS4.png"), width = 9, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Correlation_Bootstrap_FigS4.jpeg"), width = 9, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Correlation_Bootstrap_FigS4.pdf"), width = 9, height = 7)
+
+```
+
+There is a concern that this result could be due to mathematical dependency between exposure and sensitivity. BCS concern was:
+- Populations may vary in their inter-annual temperature variation (i.e. some populations have large year to year variation in temp while others do not)
+- Increased inter-annual temperature variation could lead to:
+- Higher phenological slopes as we observe a larger range of possible environments (i.e. if temperature never varied, we'd struggle to estimate phenological slope as phenology would not change over time)
+- A shallower climate change exposure as the temporal trend is masked by inter-annual variation
+
+To overcome this we can simulate a scenario where sensitivity and exposure are independent with different levels of inter-annual temperature variation and see if we can detect a similar negative effect.
+
+We first need to extract information from the raw data to feed into our model.
+
+*Sensitivity slope*
+
+```{r}
+
+#Take the average sensitivity of populations with a true climate window
+sense_slope <- mean(Consv$SEM_beta)
+
+```
+
+*Sensitivity slope standard deviation*
+
+This will be used to allow for inter-population variation in sensitivity (i.e. random slopes)
+
+```{r}
+
+#Take sd of sensitivity of populations with a true climate window
+sense_sd <- sd(Consv$SEM_beta)
+
+```
+
+*Residual error in sensitivity slopes*
+
+This is the sd of the residuals distributed (normally) around the slope
+
+```{r}
+
+#Load all climwin outputs and determine the sd of all true climate windows
+#Take the mean of these sds
+file_path <- list.files(here::here("data/unshared_files"), pattern = "T.RDS", full.names = TRUE)
+file_name <- list.files(here::here("data/unshared_files"), pattern = "T.RDS")
+
+consv_files <- file_path[stringr::str_remove(file_name, ".RDS") %in% Consv$Pop_sp]
+
+pb <- progress::progress_bar$new(total = length(consv_files))
+sense_residuals <- purrr::map_dbl(.x = consv_files,
+                                  .f = ~{
+                                    
+                                    pb$tick()
+                                    pop <- readRDS(..1)
+                                    
+                                    return(sd(pop[[1]]$BestModel$residuals))
+                                    
+                                  }) %>% 
+  mean()
+
+```
+
+*Exposure slope*
+
+```{r}
+
+#Take the average exposure of populations with a true climate window
+#Need to remove NAs because of Vlieland
+exp_slope <- mean(Consv$CC_allyrs_beta, na.rm = TRUE)
+
+```
+
+*Exposure slope standard deviation*
+
+```{r}
+
+#Take sd of sensitivity of populations with a true climate window
+#Need to remove NAs because of Vlieland
+exp_sd <- sd(Consv$CC_allyrs_beta, na.rm = TRUE)
+
+```
+
+*Residual error in exposure slopes*
+
+This is the sd of the residuals distributed (normally) around the slope
+
+```{r}
+
+#Load all climwin outputs and determine the sd of all true climate windows
+#Take the mean of these sds
+file_path <- list.files(here::here("data/unshared_files"), pattern = "SEM.RDS", full.names = TRUE)
+file_name <- list.files(here::here("data/unshared_files"), pattern = "SEM.RDS")
+
+consv_files <- file_path[stringr::str_remove(file_name, "_SEM.RDS") %in% Consv$Pop_sp]
+
+pb <- progress::progress_bar$new(total = length(consv_files))
+exp_residuals <- purrr::map_dbl(.x = consv_files,
+                                .f = ~{
+                                  
+                                  pb$tick()
+                                  
+                                  SEM_output <- readRDS(..1)
+                                  
+                                  model_df <- estimate_exposure(SEM_output = SEM_output, return = "model")
+                                  
+                                  return(sd(model_df$model[[1]]$residuals, na.rm = TRUE))
+                                  
+                                })
+
+exp_residuals <- mean(exp_residuals, na.rm = TRUE)
+
+```
+
+Combine all data in a single table
+
+```{r}
+
+input_data <- tibble(sense_slope = sense_slope,
+                     sense_sd = sense_sd,
+                     sense_residuals = sense_residuals,
+                     exp_slope = exp_slope,
+                     exp_sd = exp_sd,
+                     exp_residuals = exp_residuals)
+
+```
+
+Now that we have all our input variables, we can simulate the correlation we would expect between exposure and sensitivity if the two were unrelated.
+
+```{r}
+
+if (!file.exists(here::here("./data/Appendix1_var01.rda"))) {
+  
+  #var is the sd of additional error that will be added to temperature
+  #i.e. temp in year i = (mean_slope + random_slope) * yeari + rnorm(mean = 0, sd = residual + rnorm(mean = 0, sd = var))
+  #i is the number of iterations of the simulation we will conduct
+  Appendix1_var01 <- Ben_sim_i(interpop_var = 0.1, i = 1000,
+                               avg_sensitivity = input_data$sense_slope,
+                               sd_sensitivity = input_data$sense_sd,
+                               resid_sense = input_data$sense_residuals,
+                               avg_exposure = input_data$exp_slope,
+                               sd_exposure = input_data$exp_sd,
+                               resid_exp = input_data$exp_residuals)
+  
+  save(Appendix1_var01, file = here::here("./data/Appendix1_var01.rda"))
+  
+}
+
+if (!file.exists(here::here("./data/Appendix1_var02.rda"))) {
+  
+  #var is the sd of additional error that will be added to temperature
+  #i.e. temp in year i = (mean_slope + random_slope) * yeari + rnorm(mean = 0, sd = residual + rnorm(mean = 0, sd = var))
+  #i is the number of iterations of the simulation we will conduct
+  Appendix1_var02 <- Ben_sim_i(interpop_var = 0.2, i = 1000,
+                               avg_sensitivity = input_data$sense_slope,
+                               sd_sensitivity = input_data$sense_sd,
+                               resid_sense = input_data$sense_residuals,
+                               avg_exposure = input_data$exp_slope,
+                               sd_exposure = input_data$exp_sd,
+                               resid_exp = input_data$exp_residuals)
+  
+  save(Appendix1_var02, file = here::here("./data/Appendix1_var02.rda"))
+  
+}
+
+if (!file.exists(here::here("./data/Appendix1_var03.rda"))) {
+  
+  #var is the sd of additional error that will be added to temperature
+  #i.e. temp in year i = (mean_slope + random_slope) * yeari + rnorm(mean = 0, sd = residual + rnorm(mean = 0, sd = var))
+  #i is the number of iterations of the simulation we will conduct
+  Appendix1_var03 <- Ben_sim_i(interpop_var = 0.3, i = 1000,
+                               avg_sensitivity = input_data$sense_slope,
+                               sd_sensitivity = input_data$sense_sd,
+                               resid_sense = input_data$sense_residuals,
+                               avg_exposure = input_data$exp_slope,
+                               sd_exposure = input_data$exp_sd,
+                               resid_exp = input_data$exp_residuals)
+  
+  save(Appendix1_var03, file = here::here("./data/Appendix1_var03.rda"))
+  
+}
+
+```
+
+Show results from sims (Fig. S7)
+
+```{r, fig.width = 12, fig.height = 5}
+
+load(here::here("./data/Appendix1_var01.rda"))
+load(here::here("./data/Appendix1_var02.rda"))
+load(here::here("./data/Appendix1_var03.rda"))
+
+#Join data together and determine the correlation for every iteration in every different input value
+full_data <- purrr::map2_df(.x = list(Appendix1_var01, Appendix1_var02, Appendix1_var03),
+                            .y = c("0.1", "0.2", "0.3"),
+                            .f = ~{
+                              
+                              ..1 %>% 
+                                mutate(var_grp = as.character(..2))
+                              
+                            })
+
+plot_data <- full_data %>% 
+  group_by(var_grp, i) %>% 
+  summarise(cor = cor(exp_coef, ld_coef), .groups = "drop")
+
+median_cor <- plot_data %>% 
+  group_by(var_grp) %>% 
+  summarise(median_cor = median(cor),
+            mean_cor = mean(cor),
+            .groups = "drop") 
+
+#Create histogram of Pearson's correlation for each variance group
+ggplot() +
+  geom_histogram(data = plot_data, aes(x = cor, y = ..count../sum(..count..)), bins = 25, fill = "light grey",
+                 colour = "black") +
+  geom_vline(data = median_cor, aes(xintercept = median_cor), lty = 2, size = 1) +
+  geom_text(data = median_cor, aes(x = mean_cor + 0.035, y = 0.05, label = format(signif(median_cor, 3), scientific = TRUE))) +
+  geom_text(data = data.frame(x = c(-0.125, -0.125, -0.125),
+                              y = c(0.0475, 0.0475, 0.0475),
+                              var_grp = c("0.1", "0.2", "0.3"),
+                              label = c("A)", "B)", "C)")), aes(x = x, y = y, label = label), size = 5) +
+  facet_wrap(facets = ~var_grp) +
+  scale_y_continuous(name = "Proportion of simulations") +
+  scale_x_continuous(name = "Pearson's correlation") +
+  theme_classic(base_family = "sans") +
+  theme(legend.position = "none",
+        axis.text = element_text(colour = "black", size = 12),
+        axis.title = element_text(colour = "black", size = 15),
+        strip.text = element_text(colour = "black", size = 12),
+        plot.margin = margin(25, 25, 25, 25))
+
+ggplot2::ggsave(filename = here::here("plots/Simulation_FigS7.png"), width = 17, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Simulation_FigS7.jpeg"), width = 17, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Simulation_FigS7.pdf"), width = 17, height = 7)
+
+```
+
+Show how increased inter-annual variation in temperature can affect our detection of 
+
+# Create supplementary data table for all populations (Supplementary Data 1) 
+
+```{r, eval = FALSE}
+
+gen_tableS1()
+
+```

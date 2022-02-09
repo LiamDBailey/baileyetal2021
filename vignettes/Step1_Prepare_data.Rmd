@@ -1,0 +1,134 @@
+---
+title: "Step1_Prepare_data"
+author: "Liam D. Bailey"
+date: "18/10/2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+#Overview:
+
+In this vignette, we use the functions `estimate_sensitivity()` and `estimate_exposure()` to determine the phenological sensitivity and climate exposure of all 67 population/species combinations.
+
+**Note:** Although we include code for running temperature windows and structural equation models this is not executed in the vignette because it takes a long time.
+
+**Note:** Mean daily temperature data from ECA&D v17.0 is not stored with the package, but can be requested from ECA&D (https://www.ecad.eu/).
+
+```{r, message=FALSE}
+
+#Load packages and set options
+options(scipen = 200)
+library(tidyverse)
+#climwin
+library(climwin)
+#Load internal functions
+library(bailey2021)
+
+```
+
+# Run climwin and SEM
+
+- We extract mean daily temperature data and load laying date data, which is stored in the package files.
+
+- We run a sliding window analysis for all populations.
+
+- We run a randomisation procedure to overcome issues of multiple test.
+
+- We run SEM for all populations with 1,000 bootstrap iterations to determine coefficients.
+
+```{r, eval = FALSE}
+
+#Load mean temperature data
+#Temperature data file can be requested from https://www.ecad.eu/ archive
+temp_data  <- raster::stack(here::here("data/unshared_files/tg_0.25deg_reg_v17.0.nc"))
+
+#Load laying date data
+data("Lay_date_summary")
+
+#Run climwin and randwin with 100 iterations.
+#Run SEM with 1000 bootstrap iterations to determine SEs
+#after accounting for possible shared trends
+all_results <- estimate_sensitivity(input_data = Lay_date_summary, temp_data = temp_data,
+                                    randwin = TRUE, repeats = 100, SEM = TRUE, i = 1000)
+
+```
+
+# Create data frame with results
+
+Once we have run climwin, randwin, and SEM we can then determine the PAICc significance of climate windows in every population.
+
+```{r, warning=FALSE}
+
+#Link to files output from climwin
+all_files <- list.files(here::here("./data/unshared_files"), pattern = "rand.RDS", full.names = TRUE)
+
+pb <- txtProgressBar(max = length(all_files), style = 3)
+
+sem_output <- purrr::map_dfr(.x = 1:length(all_files),
+                             .f = ~{
+                               
+                               setTxtProgressBar(pb, value = ..1)
+                               
+                               SEM_path <- gsub(all_files[..1], pattern = "_rand.RDS", replacement = "_SEM.RDS")
+                               climwin_path <- gsub(all_files[..1], pattern = "_rand.RDS", replacement = ".RDS")
+                               randwin_path <- all_files[..1]
+                               
+                               #Firstly, extract the output from run_SEM that has the overview of the top model
+                               output <- readRDS(SEM_path) %>% 
+                                 dplyr::mutate(PAIC = as.character(climwin::pvalue(
+                                   dataset = readRDS(climwin_path)[[1]]$Dataset,
+                                   datasetrand = readRDS(randwin_path)[[1]],
+                                   metric = "AIC")))
+                               
+                               output$PAIC_dbl <- ifelse(output$PAIC == "<0.001", 0.001, as.numeric(output$PAIC))
+                               
+                               return(output)
+                               
+                             })
+
+```
+
+# Determine rate of climate change
+
+Then we use `estimate_exposure` to determine the rate of climate change over time between 1950 and 2017. Save all this data in a single file for model fitting.
+
+```{r}
+
+climate_sensitivity_and_exposure <- estimate_exposure(sem_output)
+
+```
+
+We now have a data frame that includes:
+
+- The best window estimated by climwin.
+
+- The significance of this window, using PAICc method with randwin and 100 iterations.
+
+- The coefficient estimate for the relationship between temperature and mean annual laying date
+after detrending with SEM using bootstrapping with 1,000 iterations (i.e. sensitivity)
+
+- The rate of climate change at each site during the population specific temperature window over the period 1950 - 2017
+(i.e. exposure).
+
+Next we can join in the physical characteristics of each population that we use for analysis. This includes:
+
+- Habitat type
+- Coordinates
+
+```{r}
+
+data("Pop_info")
+
+climate_sensitivity_and_exposure <- climate_sensitivity_and_exposure %>% 
+  dplyr::left_join(Pop_info, by = "Pop_ID")
+
+```
+
+We can now save this file in the package for use in analyses.
+
+```{r}
+
+usethis::use_data(climate_sensitivity_and_exposure, overwrite = TRUE)
+
+```

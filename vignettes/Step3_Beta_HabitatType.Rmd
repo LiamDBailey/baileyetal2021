@@ -1,0 +1,576 @@
+---
+title: "Step3_Beta_HabitatType"
+author: "Liam D. Bailey"
+date: "18/10/2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, include = FALSE}
+
+#Load packages and set options
+options(scipen = 200)
+library(extrafont)
+library(tidyverse)
+library(glue)
+#For modelling
+library(lme4)
+library(spaMM)
+#For calculating CIs
+library(doSNOW)
+#For tables
+library(knitr)
+library(kableExtra)
+#For spatial information
+library(sp)
+library(sf)
+library(rnaturalearth)
+library(raster)
+#For plotting
+library(patchwork)
+library(raster)
+library(stars)
+library(bailey2021)
+
+#Palette
+#Taken from https://colorbrewer2.org/ Dark2 palette
+#This palette is listed as colourblind friendly and can also be viewed in colourblind mode here
+#https://davidmathlogic.com/colorblind/#%23D95F02-%237570B3-%231B9E77
+friendly_palette <- c("#d95f02", "#7570b3", "#1b9e77")
+
+```
+
+#Overview:
+
+In this step, we will look at the relationship between phenological sensitivity and ecological characteristics, particularly habitat type.
+
+We load our data that was prepared using `estimate_sensitivity` and `estimate_exposure` and compiled in the vignette `Step1_Prepare_data.Rmd`
+
+```{r}
+
+data("climate_sensitivity_and_exposure")
+
+head(climate_sensitivity_and_exposure)
+
+```
+
+We then create a measure of window mid point and duration. We will adjust window midpoint to be in Julian days (rather than days before June 1st) as this is more intuitive for readers.
+
+```{r}
+
+#Create a measure of midpoint which is in Julian days (i.e. values should get smaller as they get earlier)
+model_data <- climate_sensitivity_and_exposure %>%
+  #Turn midpoint into Julian date and create Pop_sp
+  dplyr::rowwise() %>% 
+  dplyr::mutate(Midpoint_Julian = 153 - mean(c(WindowOpen, WindowClose)),
+                Duration = WindowOpen - WindowClose,
+                Pop_sp = paste(Pop_ID, Species, sep = "_"),
+                SEM_beta_abs = abs(SEM_beta)) %>% 
+  dplyr::ungroup()
+
+```
+
+For our analysis we only want to include population/species combinations where a reliable window was detected. We will run our analysis with a conservative subset of the data: Only windows where PAICc is <= 0.05 (i.e. where the probability that the observed AICc result is drawn from the distribution of randomised data is <= 5%). We exclude 'short windows' (<= 14 days) as we consider these likely statistical artefacts.
+
+```{r}
+
+Consv <- filter(model_data, PAIC_dbl <= 0.05 & Duration > 14)
+
+message(paste0("The conservative subset includes ", nrow(Consv), " datapoints, or, ", round((nrow(Consv)/nrow(model_data))*100, 2), "% of the data \n \n"))
+
+message(paste0("The conservative subset includes ", length(unique(Consv$Pop_ID)), " populations, or, ", round(length(unique(Consv$Pop_ID))/length(unique(model_data$Pop_ID))*100, 2), "% of total populations"))
+
+```
+
+Join in precipitation data from Metzger et al. principal component analysis. This provides a broad measure of annual precipitation patterns.
+
+```{r}
+
+data("Metzger_PCA")
+
+Consv <- Consv %>% 
+  left_join(Metzger_PCA, by = "Pop_ID") %>% 
+  dplyr::mutate(Rain = as.numeric(scale(PC3_Precip)))
+
+```
+
+First, we test for interaction with species
+
+```{r}
+
+interaction_mod <- spaMM::fitme(SEM_beta_abs ~ Habitat_Type*Species + Rain*Species + (1|Pop_ID) + Matern(1|Longitude + Latitude), data = Consv, prior.weights = 1/SEM_SE)
+
+```
+
+Check model assumptions
+
+*Heteroskedasticity*
+
+```{r, fig.width = 5, fig.height = 4}
+
+resid  <- residuals(interaction_mod, type = "pearson")
+fitted <- fitted(interaction_mod)
+
+ggplot() +
+  geom_point(aes(x = fitted, y = resid), shape = 21, size = 3) +
+  geom_hline(yintercept = 0, lty = 2) +
+  theme_classic()
+
+```
+
+Looks like a number of outliers.
+
+*Normality of residuals*
+
+```{r, fig.width = 5, fig.height = 4}
+
+qqnorm(residuals(interaction_mod, type = "response"))
+qqline(residuals(interaction_mod, type = "response"))
+
+```
+
+Outlier is also apparent in qqplot
+
+*Check linearity of relationships w/ predictors*
+
+```{r, fig.width = 10, fig.height = 4}
+
+library(patchwork)
+plot1 <- ggplot(data = NULL, aes(x = Consv$Habitat_Type, y = residuals(interaction_mod, type = "pearson"))) + geom_point()
+plot2 <- ggplot(data = NULL, aes(x = Consv$Rain, y = residuals(interaction_mod, type = "pearson"))) + geom_point() +geom_smooth()
+
+plot1 + plot2
+
+```
+
+Potential issues with outlier. We can compare to a model with no interaction and see if interactions are important.
+
+```{r}
+
+simple_mod <- spaMM::fitme(SEM_beta_abs ~ Habitat_Type + Rain + Species + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = Consv)
+
+anova(interaction_mod, simple_mod, test = "LRT")
+
+```
+
+No evidence for interaction. Look at assumptions for simple mod.
+
+*Heteroskedasticity*
+
+```{r, fig.width = 5, fig.height = 4}
+
+resid  <- residuals(simple_mod, type = "pearson")
+fitted <- fitted(simple_mod)
+
+ggplot() +
+  geom_point(aes(x = fitted, y = resid), shape = 21, size = 3) +
+  geom_hline(yintercept = 0, lty = 2) +
+  theme_classic()
+
+```
+
+Still potential outlier problem
+
+*Normality of residuals*
+
+```{r, fig.width = 5, fig.height = 4}
+
+qqnorm(residuals(simple_mod, type = "response"))
+qqline(residuals(simple_mod, type = "response"))
+
+```
+
+Outlier is also obvious in qqplot
+
+*Check linearity of relationships w/ predictors*
+
+```{r, fig.width = 10, fig.height = 4}
+
+library(patchwork)
+plot1 <- ggplot(data = NULL, aes(x = Consv$Habitat_Type, y = residuals(simple_mod, type = "pearson"))) + geom_point() +geom_smooth()
+plot2 <- ggplot(data = NULL, aes(x = Consv$Rain, y = residuals(simple_mod, type = "pearson"))) + geom_point() +geom_smooth()
+
+plot1 + plot2
+
+```
+
+Confidence intervals of models
+
+```{r, fig.width = 5, fig.height = 4, eval = FALSE}
+
+#Used for parallel bootstrappig
+CIs <- confint_2levels(mod = interaction_mod, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+ggplot(CIs) +
+  geom_hline(yintercept = 0, lty = 2, size = 1) +
+  geom_errorbar(aes(x = Variable, ymin = lower, ymax = upper), width = 0, size = 1)+
+  geom_point(aes(x = Variable, y = est), shape = 21, fill = "dark grey", size = 3)+
+  bailey2021:::theme_ubuntu(base_family = "sans") +
+  xlab("")+
+  ylab("Parameter estimate")+
+  labs("Parameter estimate +- SE for latitude:longitude interaction")+
+  labs(title = "Parametric bootstrap")
+
+```
+
+Generate model table for the full model with interactions.
+
+```{r, eval = FALSE}
+
+CIs %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+We conclude that the interaction is not informative and use the more parsimonious model instead.
+
+```{r}
+
+summary(simple_mod)
+
+```
+
+Refit model with lmer to determine VIF and test for multi-collinearity.
+
+```{r}
+
+lme4::lmer(SEM_beta_abs ~ Habitat_Type + Rain + Species + (1|Pop_ID), weights = 1/SEM_SE, data = Consv) %>% 
+  car::vif()
+
+```
+
+Additional multi-collinearity investigation to make sure that VIF is reliable. Firstly, we can just check that there is no major relationship between any of our variables. We can use correlation coefficient for continuous variables, or fit models to look at relationships with categories.
+
+```{r}
+
+#Relationship between habitat and rain
+#No relationship
+lm(Rain ~ Habitat_Type, data = Consv %>% distinct(Pop_ID, Habitat_Type, Rain)) %>% 
+  summary()
+
+```
+
+```{r}
+
+#Relationship between habitat and species (treat species is binomial)
+#No relationship
+glm(as.numeric(as.factor(Species)) - 1 ~ Habitat_Type, data = Consv, family = "binomial") %>% 
+  summary()
+
+```
+
+```{r}
+
+#Relationship between species and rain
+#No relationship
+lm(Rain ~ Species, data = Consv) %>% 
+  summary()
+
+```
+
+Suggested by Alex and online, we can also look at type I anova (i.e. factors added sequentially to base model) to type II anova (i.e. each factor removed from the full model). If there is no major collinearity, these should give similar conclusions.
+
+type I
+
+```{r, eval = FALSE}
+
+empty_mod <- spaMM::fitme(SEM_beta_abs ~ 1 + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = Consv)
+
+base_mod <- spaMM::fitme(SEM_beta_abs ~ Habitat_Type + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = Consv)
+
+#Adding Habitat Type has no effect
+baseLRT_SE <- LRT(empty_mod, base_mod, boot.repl = 500, nb_cores = 4)
+baseLRT_SE$rawBootLRT$mod <- "base"
+
+next_mod <- spaMM::fitme(SEM_beta_abs ~ Habitat_Type + Rain + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = Consv)
+
+#Adding Rain has no effect
+nextLRT_SE <- LRT(base_mod, next_mod, boot.repl = 500, nb_cores = 4)
+nextLRT_SE$rawBootLRT$mod <- "next"
+
+full_mod <- spaMM::fitme(SEM_beta_abs ~ Habitat_Type + Rain + Species + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = Consv)
+
+#Adding species has no effect
+fullLRT_SE <- LRT(next_mod, full_mod, boot.repl = 500, nb_cores = 4)
+fullLRT_SE$rawBootLRT$mod <- "full"
+
+all_test <- baseLRT_SE$rawBootLRT %>% 
+  bind_rows(nextLRT_SE$rawBootLRT) %>% 
+  bind_rows(fullLRT_SE$rawBootLRT)
+
+all_test
+
+```
+
+type II
+
+```{r, eval = FALSE}
+
+full_mod <- spaMM::fitme(SEM_beta_abs ~ Habitat_Type + Rain + Species + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = Consv)
+
+noHabitat <- spaMM::fitme(SEM_beta_abs ~ Rain + Species + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = Consv)
+
+#Removing habitat type is not significant
+noHabitat_SE <- LRT(full_mod, noHabitat, boot.repl = 500, nb_cores = 4)
+noHabitat_SE$rawBootLRT$variable <- "habitat"
+
+noRain <- spaMM::fitme(SEM_beta_abs ~ Habitat_Type + Species + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = Consv)
+
+#Removing rain has no effect
+noRain_SE <- LRT(full_mod, noRain, boot.repl = 500, nb_cores = 4)
+noRain_SE$rawBootLRT$variable <- "rain"
+
+noSpecies <- spaMM::fitme(SEM_beta_abs ~ Habitat_Type + Rain + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = Consv)
+
+#Removing species has no effect
+noSpecies_SE <- LRT(full_mod, noSpecies, boot.repl = 500, nb_cores = 4)
+noSpecies_SE$rawBootLRT$variable <- "species"
+
+all_test <- noHabitat_SE$rawBootLRT %>% 
+  bind_rows(noRain_SE$rawBootLRT) %>% 
+  bind_rows(noSpecies_SE$rawBootLRT)
+
+all_test
+
+```
+
+Comparison of anovas shows no difference. We do not find that habitat is significant using a LRT approach, but we are most interested in the individual effects of each habitat type rather than the overall effect of the variable.
+
+```{r, eval = FALSE}
+
+CIs_simple <- confint_2levels(mod = simple_mod, method = "boot", model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+ggplot(CIs_simple) +
+  geom_hline(yintercept = 0, lty = 2, size = 1) +
+  geom_errorbar(aes(x = Variable, ymin = lower, ymax = upper), width = 0, size = 1)+
+  geom_point(aes(x = Variable, y = est), shape = 21, fill = "dark grey", size = 3)+
+  bailey2021:::theme_ubuntu(base_family = "sans")+
+  xlab("")+
+  ylab("Parameter estimate")+
+  labs("Parameter estimate +- SE for latitude:longitude interaction")+
+  labs(title = "Parametric bootstrap")
+
+```
+
+Generate model table for the full model with interactions.
+
+```{r, eval = FALSE}
+
+CIs_simple %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+Plot the Matern data for the spatial autocorrelation (stolen from filled.mapMM code)
+
+First, plot the relatioship between distance and pairwise correlation (Fig. S5)
+
+```{r}
+
+plot_data <- tibble(dist = seq(0.001, 10, length.out = 1000))
+plot_data$corr <- MaternCorr(d = plot_data$dist,
+                             rho = simple_mod$CorrEst_and_RanFix$corrPars$`2`$rho,
+                             nu = simple_mod$CorrEst_and_RanFix$corrPars$`2`$nu)
+
+ggplot(data = plot_data) +
+  geom_line(aes(x = dist, y = corr)) +
+  labs(x = "Euclidian distance (d)", y = "Pairwise correlation") +
+  theme_classic() +
+  theme(axis.ticks = element_line(),
+        axis.text = element_text(family = "sans", size = 12, colour = "black"),
+        axis.title = element_text(family = "sans", size = 15, colour = "black"))
+
+
+ggplot2::ggsave(filename = here::here("plots/Matern_corrfunc_FigS5.png"), width = 8, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Matern_corrfunc_FigS5.jpeg"), width = 8, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Matern_corrfunc_FigS5.pdf"), width = 8, height = 7)
+
+```
+
+Fig S6.
+
+```{r}
+
+#Set the x and y range over which the spatial auto-correlated landscape will be estimated
+#We'll set these to be the same as the range used in our Figure 1
+#i.e. map centred around Berlin
+zoom_to <- c(13.38, 52.52)  # Berlin
+
+zoom_level <- 2.25
+
+lon_span <- 360 / 2^zoom_level
+lat_span <- 180 / 2^zoom_level
+
+lon_bounds <- c(zoom_to[1] - lon_span / 2, zoom_to[1] + lon_span / 2)
+lat_bounds <- c(zoom_to[2] - lat_span / 2, zoom_to[2] + lat_span / 2)
+
+#Load data so we can plot points
+data("Pop_info")
+
+plot_dat <- climate_sensitivity_and_exposure %>%
+  group_by(Pop_ID) %>%
+  summarise(Species = ifelse(length(unique(Species)) == 2, "Both", as.character(unique(Species))), .groups = "drop") %>%
+  mutate(Species = factor(Species, levels = c("Both", "BT", "GT"))) %>%
+  left_join(dplyr::select(Pop_info, Pop_ID, Latitude, Longitude, Habitat_Type), by = "Pop_ID") %>%
+  sf::st_as_sf(coords = c("Longitude", "Latitude")) %>% 
+  sf::st_set_crs(4326)
+
+#Return smoothObject
+#This is a model of the FITTED data (i.e. accounting for all other effects)
+#With only the spatial auto-correlation term included
+#Residual error (phi) is fixed
+#Fitted with REML
+smoothObject <- filled.mapMM(simple_mod)
+
+#Specify length.out to affect coarseness of output
+gridSteps <- 240
+#Create a grid of lat/long coordinates over which to estimate
+newdata <- tidyr::expand_grid(Longitude = seq(lon_bounds[1], lon_bounds[2], length.out = gridSteps),
+                              Latitude = seq(lat_bounds[1], lat_bounds[2], length.out = gridSteps))
+
+#Use this grid to predict sensitivity based on fitted Matern relationship
+gridpred <- predict(smoothObject, newdata = newdata, control = list(fix_predVar = FALSE))
+
+#Add predicted sensitivity as a matrix
+Zvalues <- matrix(gridpred, ncol = gridSteps)
+
+#Country borders
+worldmap <- ne_countries(scale = 'medium', type = 'map_units',
+                         returnclass = 'sf')
+
+#Create a raster from the X, Y, Z data
+#Convert it to a stars object (easier to plot with ggplot)
+LD_raster <- raster(Zvalues, xmn = lon_bounds[1], xmx = lon_bounds[2],
+                    ymn = lat_bounds[1], ymx = lat_bounds[2], crs = 4326) %>%
+  #Clip so we don't estimate in the ocean
+  raster::mask(worldmap) %>% 
+  #Convert to stars object
+  st_as_stars()
+
+#Create ggplot with world borders
+EU_Matern <- ggplot()+
+  geom_stars(data = LD_raster) +
+  geom_sf(data = worldmap, fill = NA, colour = "black") +
+  geom_sf(data = plot_dat, shape = 21, fill = "white", size = 3) +
+  scale_fill_viridis_c(na.value = 0, name = "Predicted \n sensitivity (days/C)") +
+  # geom_sf(data = plot_dat, aes(fill = Species, shape = Habitat_Type), size = 3, stroke = 1) +
+  coord_sf(xlim = lon_bounds, ylim = lat_bounds, expand = FALSE) + 
+  theme_bw(base_family = "sans") +
+  labs(title = "", x = "", y = "") +
+  theme(axis.ticks = element_line(),
+        axis.text = element_text(family = "sans", size = 14),
+        panel.background = element_rect(colour = "#4889BF"),
+        panel.grid.major = element_line(colour = "light grey"),
+        plot.margin = margin(r = 0),
+        legend.background = element_rect(colour = "black", fill = NA)) +
+  guides(fill = guide_legend(override.aes = list(shape = 23),
+                             label.theme = element_text(family = "sans", face = "italic", size = 12)),
+         shape = guide_legend(label.theme = element_text(family = "sans", size = 12)))
+
+EU_Matern
+
+ggplot2::ggsave(filename = here::here("plots/Matern_autocor_FigS6.png"), width = 7, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Matern_autocor_FigS6.jpeg"), width = 7, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Matern_autocor_FigS6.pdf"), width = 7, height = 7, dpi = 300)
+
+```
+
+Residual plots suggested some potential outliers, look at how this affects the outcome
+
+```{r}
+
+outlier_mod <- spaMM::fitme(SEM_beta_abs ~ Habitat_Type + Rain + Species + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = filter(Consv, SEM_beta_abs < 7))
+
+summary(outlier_mod)
+
+```
+
+```{r, eval = FALSE}
+
+CIs_outlier <- confint_2levels(mod = outlier_mod, method = "boot", model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+ggplot(CIs_outlier) +
+  geom_hline(yintercept = 0, lty = 2, size = 1) +
+  geom_errorbar(aes(x = Variable, ymin = lower, ymax = upper), width = 0, size = 1)+
+  geom_point(aes(x = Variable, y = est), shape = 21, fill = "dark grey", size = 3)+
+  bailey2021:::theme_ubuntu(base_family = "sans")+
+  xlab("")+
+  ylab("Parameter estimate")+
+  labs("Parameter estimate +- SE for latitude:longitude interaction")+
+  labs(title = "Parametric bootstrap")
+
+```
+
+Generate model table for the full model with outliers removed.
+
+```{r, eval = FALSE}
+
+CIs_outlier %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+Create a one sided violin plot showing the distribution of data (Fig. 4)
+
+```{r, fig.width = 5, fig.height = 4}
+
+Consv$Habitat_Type <- forcats::fct_relevel(Consv$Habitat_Type, "DEC", "MIX", "EVE")
+
+ggplot()+
+  bailey2021:::geom_flat_violin(data = Consv, aes(x = Habitat_Type, y = SEM_beta_abs, fill = Habitat_Type), alpha = 0.75, colour = "black",
+                   position = position_nudge(x = 0.02), width = 0.75) +
+  geom_boxplot(data = Consv, aes(x = Habitat_Type, y = SEM_beta_abs), width = 0.1, size = 1) +
+  scale_y_continuous(name = expression('Phenological sensitivity (days advanced/'*~degree*'C)'), limits = c(0, 8)) +
+  scale_x_discrete(name = "", labels = c("Deciduous", "Mixed", "Evergreen")) +
+  scale_fill_manual(values = friendly_palette, name = "Habitat Type",
+                    guide = FALSE) +
+  # scale_fill_manual(values = c("#CA3C25", "#33658A", "#4C9F70"), name = "Habitat Type",
+  #                   guide = FALSE) +
+  guides(colour = guide_legend(override.aes = list(size = 3, shape = 21, stroke = 1, lty = NA))) +
+  theme_classic(base_family = "sans", base_size = 15) +
+  theme(legend.position = c(1.125, 0.5),
+        legend.box = "horizontal",
+        legend.background = element_rect(fill = "white", colour = "black"),
+        axis.text = element_text(size = 12, colour = "black"),
+        axis.title = element_text(size = 15))
+
+ggplot2::ggsave(filename = here::here("plots/Habitat_Type_BP_Fig4.png"), width = 7, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Habitat_Type_BP_Fig4.jpeg"), width = 7, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Habitat_Type_BP_Fig4.pdf"), width = 7, height = 7, dpi = 300)
+
+```
+
+To answer numerous questions, it's worth reporting the mean and range of delays.
+
+```{r}
+
+print(mean(Consv$SEM_beta_abs))
+
+print(range(Consv$SEM_beta_abs))
+
+```

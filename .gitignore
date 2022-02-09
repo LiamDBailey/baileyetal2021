@@ -1,0 +1,9 @@
+.Rproj.user
+.Rhistory
+.RData
+*.nc
+*.RDS
+*.html
+*.csv
+./data/*
+data/unshared_files/

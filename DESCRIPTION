@@ -1,0 +1,36 @@
+Package: bailey2021
+Type: Package
+Title: Bird populations most exposed to climate change are less sensitive to climatic variation
+Version: 0.1
+Authors@R: c(person("Liam", "Bailey", email = "liam.bailey@liamdbailey.com", role = c("aut", "cre"), comment = c(ORCID = "0000-0002-8226-9454")))
+Description: This R package documents the analysis conducted for the paper
+  'Bird populations most exposed to climate change are less sensitive to climatic variation' published
+  in Nature Communications. DOI: TBD
+Depends: R (>= 4.0.0)
+License: GPL (>=2)
+Encoding: UTF-8
+LazyData: true
+LazyDataCompression: xz
+VignetteBuilder: utils
+RoxygenNote: 7.1.2
+Imports: dplyr,
+    lavaan,
+    ggplot2,
+    spaMM,
+    lme4,
+    raster,
+    climwin,
+    sp,
+    lubridate,
+    kableExtra,
+    purrr,
+    cowplot,
+    glue,
+    gtable,
+    here,
+    janitor,
+    progress,
+    rgeos,
+    stringr,
+    tidyr
+Suggests: utils

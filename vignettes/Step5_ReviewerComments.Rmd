@@ -1,0 +1,442 @@
+---
+title: "Reviewer_comments"
+output: html_document
+---
+
+```{r}
+
+library(dplyr)
+library(raster)
+library(sp)
+library(spaMM)
+library(purrr)
+library(doSNOW)
+library(kableExtra)
+library(ggplot2)
+
+#Palette
+#Taken from https://colorbrewer2.org/ Dark2 palette
+#This palette is listed as colourblind friendly and can also be viewed in colourblind mode here
+#https://davidmathlogic.com/colorblind/#%23D95F02-%237570B3-%231B9E77
+friendly_palette <- c("#d95f02", "#7570b3", "#1b9e77")
+
+```
+
+#Overview:
+
+This vignette includes additional analysese/checks that were carried out in response to reviewer comments.
+
+# 1. Relationship between exposure and variance
+
+Reviewers have rasied a few points about possible empirical/mathematical relationships that could explain our results. We believe one common misconception here is that people are equating exposure (i.e. change in mean T) with temperature variance. Populations that are more 'stable' (i.e. have lower exposure) could have a narrower range of temperatures, leading to regression dilution (i.e. variance in phenology caused by error/unexplained variance is much greater than observed variance from temp); however, it should not be assumed that lower exposure equates to a narrower range of temperatures due to differences in temperature variance. To address this, we want to include an additional figure showing relationship between these two variables.
+
+```{r}
+
+#Load csv file with adjusted locations for using ECAD grid (e.g. Cardiff is in a different location to match the ECAD grid)
+data("ECAD_locations")
+
+#Load temp data
+#Temperature data file can be requested from https://www.ecad.eu/ archive
+temp_data <- raster::stack(here::here("data/unshared_files/tg_0.25deg_reg_v17.0.nc"))
+
+#Load output of all climwin files that contains information on the best window.
+data("climate_sensitivity_and_exposure")
+
+output <- climate_sensitivity_and_exposure %>%
+  dplyr::mutate(Pop_sp = paste(Pop_ID, Species, sep = "_")) %>%
+  dplyr::mutate(Open_date = as.Date("01/06/2018", format = "%d/%m/%Y") - WindowOpen,
+                Close_date = as.Date("01/06/2018", format = "%d/%m/%Y") - WindowClose)
+
+#Make location of current population into spatial points dataframe
+location_spatial <- SpatialPointsDataFrame(coords = ECAD_locations[, c('Longitude', 'Latitude')],
+                                           data = ECAD_locations,
+                                           proj4string = CRS(as.character("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")))
+
+###Extract temperature data###
+#Determine date data for each layer of the raster (allows us to sort by each year).
+temp_dates <- data.frame(Date = as.Date(names(temp_data), format = "X%Y.%m.%d"))
+
+#Make a subset that excludes Sicily and Vlieland as we don't have the same number of years
+#to estimate climate change.
+output <- dplyr::filter(output, !Pop_ID %in% c("VLI", "SIC"))
+
+#Run through each row of the output dataset and determine rate of climate change since 1950 in the designated window
+#AND the variance of temp
+exposure_output <- purrr::pmap_df(.l = list(Pop_sp = output$Pop_sp, current_Pop_ID = output$Pop_ID,
+                                            Open_date = output$Open_date, Close_date = output$Close_date),
+                                  .f = function(Pop_sp, current_Pop_ID, Open_date, Close_date){
+                                    
+                                    Open_date <- as.Date(Open_date, origin = "1970-01-01")
+                                    Close_date <- as.Date(Close_date, origin = "1970-01-01")
+                                    
+                                    year      <- seq(min(lubridate::year(temp_dates$Date)), max(lubridate::year(temp_dates$Date)))
+                                    mean_temp <- purrr::map_dbl(.x = year, .f = function(x){
+                                      
+                                      min_date <- as.Date(paste(lubridate::day(Open_date), lubridate::month(Open_date), x, sep = "/"),
+                                                          format = "%d/%m/%Y")
+                                      max_date <- as.Date(paste(lubridate::day(Close_date), lubridate::month(Close_date), x, sep = "/"),
+                                                          format = "%d/%m/%Y")
+                                      current_location = subset(location_spatial, Pop_ID == current_Pop_ID)
+                                      
+                                      mean(extract(temp_data[[which(temp_dates$Date >= min_date & temp_dates$Date <= max_date)]],
+                                                   current_location))
+                                      
+                                    })
+                                    
+                                    print(Pop_sp)
+                                    
+                                    mod <- lm(mean_temp ~ year)
+                                    
+                                    var <- var(c(mean_temp))
+                                    
+                                    browser()
+                                    
+                                    return(data.frame(Pop_sp = Pop_sp,
+                                                      CC_allyrs_beta = summary(mod)$coefficient[2],
+                                                      CC_allyrs_SE = summary(mod)$coefficient[4], stringsAsFactors = FALSE,
+                                                      var = var))
+                                    
+                                  })
+
+```
+
+```{r}
+
+exp_sig <- exposure_output %>% 
+  dplyr::filter(stringr::str_sub(.data$Pop_sp, start = 1, end = 3) %in% unique(climate_sensitivity_and_exposure$Pop_ID[which(climate_sensitivity_and_exposure$PAIC_dbl <= 0.05)]))
+
+library(ggplot2)
+ggplot(data = exp_sig) +
+  geom_point(aes(x = CC_allyrs_beta, y = var), size = 3, shape = 21, fill = "grey50") +
+  geom_smooth(aes(x = CC_allyrs_beta, y = var), method = "lm", se = FALSE) +
+  theme_classic() +
+  labs(x = "Climate change exposure (1950 - 2017)", y = "Inter-annual temperature variance (1950 - 2017)") +
+  scale_y_continuous(limits = c(0, NA))
+
+```
+
+```{r}
+
+cor(exp_sig$CC_allyrs_beta, exp_sig$var)
+
+```
+
+#2. Relationship between variance and sensitivity
+
+```{r}
+
+var_sense_cor <- exp_sig %>% 
+  left_join(dplyr::select(climate_sensitivity_and_exposure, Pop_sp, SEM_beta), by = "Pop_sp")
+
+ggplot(data = var_sense_cor) +
+  geom_point(aes(x = var, y = SEM_beta), size = 3, shape = 21, fill = "grey50") +
+  geom_smooth(aes(x = var, y = SEM_beta), method = "lm", se = FALSE) +
+  theme_classic() +
+  labs(x = "Inter-annual temperature variance (1950 - 2017)", y = "Phenological sensitivity (days/C)")
+
+```
+
+#3. Number of years per site
+
+Add this following comments by reviewer 2 (with nest box info)
+
+```{r}
+
+climate_sensitivity_and_exposure %>% 
+  dplyr::select(Pop_sp, sample.size)
+
+```
+
+#4. Start date of each study
+
+```{r}
+
+input_data <- read.csv(here::here("data/unshared_files/Brood_info.csv"),
+                       header = T, sep = ",", stringsAsFactors = FALSE)
+
+input_data %>% 
+  dplyr::filter(Species %in% c("BT", "GT")) %>% 
+  dplyr::group_by(Pop_ID, Species) %>% 
+  dplyr::summarise(firstdate = min(Sample_year), .groups = "drop") %>% 
+  dplyr::pull(firstdate) %>% 
+  range()
+
+```
+
+#5 Using MODIS data
+
+```{r}
+
+data("climate_sensitivity_and_exposure")
+
+data_owner_habitat <- climate_sensitivity_and_exposure %>% 
+  dplyr::select(Pop_ID, Habitat_Type) %>% 
+  dplyr::distinct()
+
+data("MODIS_data")
+data("MODIS_translation")
+
+raw_MODIS <- MODIS_data %>% 
+  dplyr::select(Pop_ID, LCCS1, IGBP:PFT) %>% 
+  tidyr:::pivot_longer(cols = c(LCCS1:PFT)) %>% 
+  dplyr::left_join(MODIS_translation, by = c("name", "value"))
+
+```
+
+Determine most common habitat classification for each Pop_ID
+
+```{r}
+
+MODIS <- raw_MODIS %>% 
+  dplyr::select(Pop_ID, name, category) %>% 
+  #Convert categories into broader groups
+  dplyr::mutate(category_grp = case_when(stringr::str_detect(category, "Deciduous") ~ "Deciduous",
+                                         stringr::str_detect(category, "Evergreen") ~ "Evergreen",
+                                         stringr::str_detect(category, "Mix") ~ "Mixed",
+                                         TRUE ~ "Other")) %>% 
+  dplyr::group_by(Pop_ID, name, category_grp) %>% 
+  dplyr::summarise(n = n(), .groups = "drop") %>% 
+  #Determine if there is a majority consensus in each of the layers
+  dplyr::group_by(Pop_ID, name) %>% 
+  dplyr::mutate(n_perc = n/sum(n)) %>% 
+  dplyr::summarise(top_category_grp = case_when(any(n_perc > 0.5) ~ category_grp[n_perc == max(n_perc)],
+                                                TRUE ~ "Unclear")) %>% 
+  dplyr::left_join(data_owner_habitat, by = "Pop_ID") %>% 
+  dplyr::ungroup()
+
+```
+
+Identify those cases where there is consensus with at least 2 layers for one of DEC/EVE/MIX.
+
+```{r}
+
+MODIS_useful <- MODIS %>% 
+  filter(top_category_grp != "Other") %>%
+  group_by(Pop_ID) %>% 
+  filter(n() > 1) %>% 
+  group_by(Pop_ID, top_category_grp) %>% 
+  summarise(n = n(),
+            Habitat_Type = first(Habitat_Type)) %>% 
+  filter(n == max(n) & n() == 1) %>% 
+  mutate(Habitat_Type_MODIS = toupper(stringr::str_sub(top_category_grp, end = 3)),
+         match = Habitat_Type_MODIS == Habitat_Type) %>% 
+  ungroup()
+
+MODIS_useful %>% 
+  filter(!match)
+
+```
+
+Plot outcomes of each layer for all sites.
+
+```{r}
+
+#Make sure layers are always ordered the same
+plot_data <- MODIS %>% 
+  dplyr::arrange(.data$Pop_ID, .data$name) %>% 
+  dplyr::left_join(dplyr::select(MODIS_useful, Pop_ID, match), by = "Pop_ID") %>% 
+  dplyr::mutate(new_match = case_when(is.na(match) ~ "No classification",
+                                      match ~ "Agreement",
+                                      !match ~ "Disagreement"))
+
+ggplot(data = plot_data) +
+  geom_bar(aes(x = Pop_ID,
+               fill = top_category_grp)) +
+  labs(x = "Population code", y = "Number of MODIS layers",
+       title = "Classification of habitat type using all 6 MODIS MCD12Q1 data sets") +
+  scale_y_continuous(breaks = seq(0, 6, 1)) +
+  scale_fill_manual(name = "MODIS classification",
+                    values = c("#CA3C25", "#4C9F70", "#33658A", "dark grey")) +
+  theme_classic() +
+  coord_cartesian(expand = FALSE)
+
+```
+
+```{r}
+
+ggplot(data = plot_data) +
+  geom_bar(aes(x = Pop_ID,
+               fill = top_category_grp)) +
+  labs(x = "", y = "",
+       title = "Classification of habitat type using each MODIS MCD12Q1 data set separately") +
+  scale_y_continuous(breaks = NULL) +
+  scale_x_discrete(breaks = NULL) +
+  scale_fill_manual(name = "MODIS classification",
+                    values = c("#CA3C25", "#4C9F70", "#33658A", "dark grey")) +
+  theme_classic() +
+  coord_cartesian(expand = FALSE) +
+  facet_wrap(facets = ~name)
+
+```
+
+We can see that the MODIS remote sensing layer fails to classify the majority of sites. It is not a viable alternative to using habitat type classifications from data owners.
+
+#6 Issue with choice of temperature for Sicily and Vlieland
+
+Using different (non-gridded) data for Sicily and Vlieland may introduce issues because each dataset will have its own set of biases and uncertainty. As this issue only exists for two datasets we can re-run our analysis with these populations excluded to see how this influences results.
+
+```{r}
+
+#LOAD DATA AND EXCLUDE VLI AND SIC
+#Load internal functions
+purrr::walk(.x = list.files(here::here("R"), pattern = ".R", full.names = TRUE), .f = source)
+
+#Load Metzger PCA
+data("Metzger_PCA")
+
+mean_LD <- read.csv(here::here("data/unshared_files/Brood_info.csv"), header = T, sep = ",", stringsAsFactors = FALSE) %>% 
+  format_data() %>% 
+  dplyr::filter(isfirst_calc == TRUE) %>% 
+  dplyr::group_by(Pop_ID, Species) %>% 
+  dplyr::summarise(mean_LD = mean(LayingDate_AprilDays, na.rm = TRUE), .groups = "drop") %>% 
+  #Laying date is in April days, make it into Julian days
+  #Assume non-leapyear
+  dplyr::mutate(mean_LD_Julian = mean_LD + 90,
+                N = n())
+
+climate_sensitivity_and_exposure <- dplyr::left_join(climate_sensitivity_and_exposure, mean_LD, by = c("Pop_ID", "Species"))
+
+#Create a measure of midpoint which is in Julian days (i.e. values should get smaller as they get earlier)
+model_data <- climate_sensitivity_and_exposure %>%
+  #Turn midpoint into Julian date and create Pop_sp
+  dplyr::rowwise() %>% 
+  dplyr::mutate(WindowOpen_Julian = 153 - WindowOpen,
+                WindowClose_Julian = 153 - WindowClose,
+                Midpoint_Julian = 153 - mean(c(WindowOpen, WindowClose)),
+                Duration = WindowOpen - WindowClose,
+                Delay = .data$mean_LD_Julian - .data$Midpoint_Julian,
+                Pop_sp = paste(Pop_ID, Species, sep = "_"),
+                SEM_beta_abs = abs(SEM_beta)) %>% 
+  dplyr::ungroup() %>% 
+  left_join(Metzger_PCA, by = "Pop_ID") %>% 
+  dplyr::mutate(Rain = scale(PC3_Precip))
+
+Consv <- filter(model_data, PAIC_dbl <= 0.05 & Duration > 14)
+
+onlygrid <- Consv %>% 
+  filter(!Pop_ID %in% c("VLI", "SIC"))
+
+```
+
+##6a: Midpoint
+
+```{r}
+
+gridonly_MP <- fitme(Midpoint_Julian ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = onlygrid)
+
+summary(gridonly_MP)
+
+```
+
+```{r}
+
+gridonly_MP_CIs <- confint_2levels(mod = gridonly_MP, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+gridonly_MP_CIs %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+Effect when we remove the Sagunto outlier. Reviewer 3 is worried about it, even though it's removal can only INCREASE the effect.
+
+```{r}
+
+gridonly_MP2 <- fitme(Midpoint_Julian ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = onlygrid %>% filter(Pop_ID != "SAG"))
+
+```
+
+```{r}
+
+gridonly_MP2_CIs <- confint_2levels(mod = gridonly_MP2, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+gridonly_MP2_CIs %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+##6b: Duration
+
+```{r}
+
+gridonly_DU <- fitme(Duration ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = onlygrid)
+
+summary(gridonly_DU)
+
+```
+
+```{r}
+
+gridonly_DU_CIs <- confint_2levels(mod = gridonly_DU, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+gridonly_DU_CIs %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+##6c: Delay
+
+```{r}
+
+gridonly_DE <- fitme(Delay ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = onlygrid)
+
+summary(gridonly_DE)
+
+```
+
+```{r}
+
+gridonly_DE_CIs <- confint_2levels(mod = gridonly_DE, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+gridonly_DE_CIs %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+##6d: Sensitivity
+
+```{r}
+
+gridonly_sense <- spaMM::fitme(SEM_beta_abs ~ Habitat_Type + Rain + Species + (1|Pop_ID) + Matern(1|Longitude + Latitude), prior.weights = 1/SEM_SE, data = onlygrid)
+
+summary(gridonly_sense)
+
+```
+
+```{r}
+
+gridonly_sense_CIs <- confint_2levels(mod = gridonly_sense, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+gridonly_sense_CIs %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```

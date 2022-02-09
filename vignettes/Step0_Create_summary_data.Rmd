@@ -1,0 +1,167 @@
+---
+title: "Step0_Create_summary_data"
+author: "Dr. Liam D. Bailey"
+date: "01/12/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+#Overview:
+
+This vignette includes the code use to convert raw phenology data (nest level) to annual phenology data used for analysis. Annual phenology data is included with this repo and shared on the Zenodo repository (DOI: XXXX).
+
+#Code:
+
+Load required packages
+
+```{r, message=FALSE}
+
+library(bailey2021)
+library(dplyr)
+
+```
+
+Load raw data. This data is not shared, but summary data (used for analyses) is available.
+
+```{r}
+
+raw_data <- read.csv(here::here("data/unshared_files/Brood_info.csv"), header = TRUE, sep = ",", stringsAsFactors = FALSE)
+
+```
+
+Format data using in-built function. This will
+
+- Filter only GT/BT with laying date info.
+- Identify first clutches using both the 30 day rule or based on data owner classification.
+
+```{r}
+
+first_nests <- format_data(raw_data)
+
+```
+
+In this analysis, we use the 30 day rule to classify first clutches. Exclude all clutches that are not considered 'first' under this rule.
+
+```{r}
+
+first_nest_subset <- first_nests %>%
+  dplyr::filter(isfirst_calc == TRUE)
+
+```
+
+After filtering clutches using 30 day rule, identify those species/population combos that can be used for our analysis. Only include years with at least 2 nest observations. Only include species/population combos with at least 9 years of data.
+
+```{r}
+
+(pop_summaries <- first_nest_subset %>%
+   dplyr::group_by(Pop_ID, Species, Sample_year) %>%
+   dplyr::summarise(NrNests = n(), .groups = "drop") %>%
+   dplyr::filter(NrNests > 1) %>%
+   dplyr::group_by(Pop_ID, Species) %>%
+   dplyr::summarise(total_yrs = length(unique(Sample_year)),
+                    avg_nest = mean(NrNests), .groups = "drop") %>%
+   dplyr::filter(total_yrs >= 9)) %>% 
+  print(n = Inf)
+
+```
+
+Filter our data to only include this subset of species/population combinations.
+
+```{r}
+
+species_pop_combos <- paste(pop_summaries$Pop_ID, pop_summaries$Species, sep = "_")
+
+focal_pops <- first_nest_subset %>% 
+  dplyr::mutate(PopSp = paste(Pop_ID, Species, sep = "_")) %>% 
+  dplyr::filter(PopSp %in% species_pop_combos)
+
+```
+
+For every species/population/year determine the mean & SE of first nest laying date. Remove those where SE cannot be calculated (i.e. <= 1 first nest in that year.)
+
+```{r}
+
+Lay_date_summary <- focal_pops %>%
+  dplyr::group_by(Pop_ID, Species, Sample_year) %>%
+  dplyr::summarise(Mean = mean(LayingDate_AprilDays),
+                   SE = sd(LayingDate_AprilDays)/sqrt(n()),
+                   Min = min(LayingDate_AprilDays), Count = n(), .groups = "drop") %>%
+  dplyr::mutate(Date = paste("01", "06", Sample_year, sep = "/"),
+                SE_calc = 1/SE) %>%
+  #Remove any years where no standard error could be calculated
+  dplyr::filter(!is.na(SE_calc) & !is.infinite(SE_calc))
+
+```
+
+Double check that every species/population has >= 9 years.
+
+```{r}
+
+double_check <- Lay_date_summary %>% 
+  dplyr::group_by(Pop_ID, Species) %>% 
+  dplyr::summarise(N = n(), .groups = "drop")
+
+all(double_check$N >= 9)
+
+```
+
+Include mean temperature in population specific temperature window. *NOTE:* This requires the sliding window analysis run in vignette `Step1_Prepare_data.Rmd`; however, it is included here to make shared data more easily re-usable.
+
+```{r}
+
+#Link to files output from climwin
+all_files <- list.files(here::here("./data/unshared_files"), pattern = "[GT|BT].RDS", full.names = TRUE)
+
+pb <- txtProgressBar(min = 0, max = length(all_files), style = 3)
+
+temp_window_data <- purrr::map_df(.x = 1:length(all_files),
+              .f = ~{
+                
+                setTxtProgressBar(pb, ..1)
+                
+                #Extract species and location
+                filename <- gsub(x = basename(all_files[..1]), pattern = ".RDS", replacement = "")
+                
+                input <- readRDS(all_files[..1])
+                pop_temp_data <- input[[1]]$BestModelData %>% 
+                  dplyr::select(Sample_year, Temp = climate) %>% 
+                  dplyr::mutate(Pop_sp = filename) %>% 
+                  tidyr::separate(col = Pop_sp, into = c("Pop_ID", "Species"))
+                
+                return(pop_temp_data)
+                
+              }
+              
+)
+
+Lay_date_summary <- Lay_date_summary %>% 
+  dplyr::left_join(temp_window_data, by = c("Sample_year", "Pop_ID", "Species"))
+
+```
+
+Save summary data for use in analysis. Also save as .csv for Zenodo repository.
+
+*NOTE:* Some years in Vlieland and Sicily have available phenology data but missing or patchy temperature data. Phenology data is still recorded here, but temperature data will be NA.
+
+```{r}
+
+usethis::use_data(Lay_date_summary, overwrite = TRUE)
+utils::write.csv(file = here::here("./data/baileyetal_phenology_data.csv"), Lay_date_summary, row.names = FALSE)
+
+```
+
+Also create and save summary data of each pop/species combo for plotting. Currently includes mean laying date information. This will be used for some figures.
+
+```{r}
+
+Population_summary <- first_nest_subset %>% 
+  dplyr::group_by(Pop_ID, Species) %>% 
+  dplyr::summarise(mean_LD = mean(LayingDate_AprilDays, na.rm = TRUE), .groups = "drop") %>% 
+  #Laying date is in April days, make it into Julian days
+  #Assume non-leapyear
+  dplyr::mutate(mean_LD_Julian = mean_LD + 90)
+
+usethis::use_data(Population_summary, overwrite = TRUE)
+
+```

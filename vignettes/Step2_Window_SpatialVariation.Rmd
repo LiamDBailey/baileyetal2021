@@ -1,0 +1,1206 @@
+---
+title: "Step2_Window_SpatialVariation"
+author: "Liam D. Bailey"
+date: "18/10/2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, include = FALSE}
+
+#Load packages and set options
+options(scipen = 200)
+library(extrafont)
+library(tidyverse)
+library(glue)
+#For modelling
+library(lme4)
+library(spaMM)
+#For bootstrap CIs
+library(doSNOW)
+#For tables
+library(knitr)
+library(kableExtra)
+#For spatial information
+library(sp)
+library(sf)
+library(rnaturalearth)
+library(raster)
+#For plotting
+library(patchwork)
+library(bailey2021)
+
+#Palette
+#Taken from https://colorbrewer2.org/ Dark2 palette
+#This palette is listed as colourblind friendly and can also be viewed in colourblind mode here
+#https://davidmathlogic.com/colorblind/#%23D95F02-%237570B3-%231B9E77
+friendly_palette <- c("#d95f02", "#7570b3", "#1b9e77")
+
+```
+
+#Overview:
+
+In this step, we will look at the variation in window characteristics. Specifically, the midpoint, duration and delay of windows.
+
+We load our data that was prepared using `estimate_sensitivity` and `estimate_exposure` and compiled in the vignette `Step1_Prepare_data.Rmd`.
+
+```{r}
+
+data("climate_sensitivity_and_exposure")
+
+head(climate_sensitivity_and_exposure)
+
+```
+
+Create a map of all 67 populations (including Sicily). This is Fig 2. in the paper.
+
+```{r, fig.height=7, fig.width=14}
+
+data("Pop_info")
+
+plot_dat <- climate_sensitivity_and_exposure %>%
+  group_by(Pop_ID) %>%
+  summarise(Species = ifelse(length(unique(Species)) == 2, "Both", as.character(unique(Species))), .groups = "drop") %>%
+  mutate(Species = factor(Species, levels = c("Both", "BT", "GT"))) %>%
+  left_join(dplyr::select(Pop_info, Pop_ID, Latitude, Longitude, Habitat_Type), by = "Pop_ID") %>%
+  filter(!is.na(Habitat_Type)) %>%
+  mutate(Habitat_Type = factor(Habitat_Type, levels = c("DEC", "MIX", "EVE"))) %>% 
+  sf::st_as_sf(coords = c("Longitude", "Latitude")) %>% 
+  sf::st_set_crs(4326)
+
+#Country borders
+worldmap <- ne_countries(scale = 'medium', type = 'map_units',
+                         returnclass = 'sf')
+
+#Create a zoom level for EU, NL, and UK
+#Trick for using zoom around a focal point from https://datascience.blog.wzb.eu/2019/04/30/zooming-in-on-maps-with-sf-and-ggplot2/
+
+#EU (centre in Berlin)
+zoom_to <- c(13.38, 52.52)  # Berlin
+
+zoom_level <- 2.25
+
+lon_span <- 360 / 2^zoom_level
+lat_span <- 180 / 2^zoom_level
+
+lon_bounds <- c(zoom_to[1] - lon_span / 2, zoom_to[1] + lon_span / 2)
+lat_bounds <- c(zoom_to[2] - lat_span / 2, zoom_to[2] + lat_span / 2)
+
+#NL (centre in Amsterdam)
+zoom_to <- c(4.9041, 52.3676)  # Amsterdam
+
+zoom_level <- 5.5
+
+lon_span_NL <- 360 / 2^zoom_level
+lat_span_NL <- 180 / 2^zoom_level
+
+lon_bounds_NL <- c(zoom_to[1] - lon_span_NL / 2, zoom_to[1] + lon_span_NL / 2)
+lat_bounds_NL <- c(zoom_to[2] - lat_span_NL / 2, zoom_to[2] + lat_span_NL / 2)
+
+#UK (centre S of Birmingham)
+zoom_to <- c(-2.2216, 52.1936)  # Birmingham
+
+zoom_level <- 5.25
+
+lon_span_UK <- 360 / 2^zoom_level
+lat_span_UK <- 180 / 2^zoom_level
+
+lon_bounds_UK <- c(zoom_to[1] - lon_span_UK / 2, zoom_to[1] + lon_span_UK / 2)
+lat_bounds_UK <- c(zoom_to[2] - lat_span_UK / 2, zoom_to[2] + lat_span_UK / 2)
+
+#Create rectangles to show the B/C subplots
+NL_box <- st_as_sfc(glue::glue('POLYGON(({xmin_NL} {ymax_NL}, {xmin_NL} {ymin_NL}, {xmax_NL} {ymin_NL}, {xmax_NL} {ymax_NL}, {xmin_NL} {ymax_NL}))',
+                               xmin_NL = lon_bounds_NL[1], xmax_NL = lon_bounds_NL[2],
+                               ymin_NL = lat_bounds_NL[1], ymax_NL = lat_bounds_NL[2])) %>% 
+  sf::st_set_crs(4326)
+UK_box <- st_as_sfc(glue::glue('POLYGON(({xmin_UK} {ymax_UK}, {xmin_UK} {ymin_UK}, {xmax_UK} {ymin_UK}, {xmax_UK} {ymax_UK}, {xmin_UK} {ymax_UK}))',
+                               xmin_UK = lon_bounds_UK[1], xmax_UK = lon_bounds_UK[2],
+                               ymin_UK = lat_bounds_UK[1], ymax_UK = lat_bounds_UK[2])) %>% 
+  sf::st_set_crs(4326)
+
+EU <- ggplot() +
+  geom_sf(data = worldmap) +
+  geom_sf(data = plot_dat, aes(shape = Species, fill = Habitat_Type), size = 3, stroke = 1) +
+  geom_sf(data = NL_box, fill = NA, colour = "black", size = 1) +
+  geom_text(aes(x = lon_bounds_NL[1] + 0.65, y = lat_bounds_NL[2] - 0.55, label = "B"), family = "sans", size = 6) +
+  geom_sf(data = UK_box, fill = NA, colour = "black", size = 1) + 
+  geom_text(aes(x = lon_bounds_UK[1] + 0.7, y = lat_bounds_UK[2] - 0.55, label = "C"), family = "sans", size = 6) +
+  coord_sf(xlim = lon_bounds, ylim = lat_bounds, expand = FALSE) + 
+  theme_bw(base_family = "sans") +
+  scale_fill_manual(values = c("#2F4F4F", "grey", "white"), labels = c("Deciduous", "Mixed", "Evergreen"), name = "Habitat Type:") +
+  scale_shape_manual(values = c(22, 21, 24), labels = c("Both", "C. caeruleus", "P. major"), name = "Species:") +
+  labs(title = "", x = "", y = "") +
+  theme(axis.ticks = element_line(),
+        axis.text = element_text(family = "sans", size = 14),
+        panel.background = element_rect(colour = "#4889BF"),
+        panel.grid.major = element_line(colour = "light grey"),
+        plot.margin = margin(r = 0),
+        legend.background = element_rect(colour = "black", fill = NA)) +
+  guides(fill = guide_legend(override.aes = list(shape = 22),
+                             label.theme = element_text(family = "sans", size = 12)),
+         shape = guide_legend(label.theme = element_text(family = "sans", face = "italic", size = 12)))
+
+NL <- ggplot()+
+  geom_sf(data = worldmap) +
+  geom_sf(data = plot_dat, aes(shape = Species, fill = Habitat_Type), size = 3, stroke = 1) +
+  coord_sf(xlim = lon_bounds_NL, ylim = lat_bounds_NL, expand = FALSE) + 
+  theme_bw(base_family = "sans") +
+  scale_fill_manual(values = c("#2F4F4F", "grey", "white"), guide = NULL) +
+  scale_shape_manual(values = c(22, 21, 24), guide = NULL) +
+  labs(title = "", x = "", y = "") +
+  theme(axis.ticks = element_line(),
+        axis.text = element_text(family = "sans", size = 14),
+        panel.background = element_rect(colour = "#4889BF"),
+        panel.grid.major = element_line(colour = "light grey"),
+        plot.margin = margin(l = 0, r = 0))
+
+UK <- ggplot() +
+  geom_sf(data = worldmap) +
+  geom_sf(data = plot_dat, aes(shape = Species, fill = Habitat_Type), size = 3, stroke = 1) +
+  coord_sf(xlim = lon_bounds_UK, ylim = lat_bounds_UK, expand = FALSE) + 
+  theme_bw(base_family = "sans") +
+  scale_fill_manual(values = c("#2F4F4F", "grey", "white"), guide = NULL) +
+  scale_shape_manual(values = c(22, 21, 24), guide = NULL) +
+  labs(title = "", x = "", y = "") +
+  theme(axis.ticks = element_line(),
+        axis.text = element_text(family = "sans", size = 14),
+        panel.background = element_rect(colour = "#4889BF"),
+        panel.grid.major = element_line(colour = "light grey"),
+        plot.margin = margin(l = 0, r = 0))
+
+Map <- (EU | (NL / UK)) + plot_layout(widths = c(2, 1), guides = 'collect') + plot_annotation(tag_levels = 'A', tag_suffix = ")")
+
+ggplot2::ggsave(filename = here::here("plots/Population_map_Fig2.png"), Map, height = 10, width = 20, units = "in", dpi = 600)
+
+ggplot2::ggsave(filename = here::here("plots/Population_map_Fig2.jpeg"), Map, height = 10, width = 20, units = "in", dpi = 600)
+
+#Fits desired ratio
+#Resize vector graphic to whatever dimensions required by journal
+ggplot2::ggsave(filename = here::here("plots/Population_map_Fig2.pdf"), Map, height = 10, width = 20, units = "in")
+
+```
+
+Check how many times we had to 'move' the location of a population to extract temperature data.
+
+```{r}
+
+data("Pop_info")
+
+message(paste0("There are ", sum(Pop_info$Longitude_new_temp != Pop_info$Longitude & Pop_info$Latitude_new_temp != Pop_info$Latitude) + 2, " populations where temperature data was not taken from the gridded data (including Vlieland and Sicily)"))
+
+Pop_info[which(Pop_info$Longitude_new_temp != Pop_info$Longitude & Pop_info$Latitude_new_temp != Pop_info$Latitude), "Site_Name"]
+
+```
+
+Read in the laying date data and join to show the mean laying date for each population
+
+```{r}
+
+data("Population_summary")
+
+climate_sensitivity_and_exposure <- dplyr::left_join(climate_sensitivity_and_exposure, Population_summary, by = c("Pop_ID", "Species"))
+
+```
+
+We then create a measure of window mid point and duration. We will adjust window midpoint to be in Julian days (rather than days before June 1st) as this is more intuitive for readers.
+
+```{r}
+
+#Create a measure of midpoint which is in Julian days (i.e. values should get smaller as they get earlier)
+model_data <- climate_sensitivity_and_exposure %>%
+  #Turn midpoint into Julian date and create Pop_sp
+  dplyr::rowwise() %>% 
+  dplyr::mutate(WindowOpen_Julian = 153 - WindowOpen,
+                WindowClose_Julian = 153 - WindowClose,
+                Midpoint_Julian = 153 - mean(c(WindowOpen, WindowClose)),
+                Duration = WindowOpen - WindowClose,
+                Delay = .data$mean_LD_Julian - .data$Midpoint_Julian,
+                Pop_sp = paste(Pop_ID, Species, sep = "_")) %>% 
+  dplyr::ungroup()
+
+```
+
+For our analysis we only want to include population/species combinations where a reliable window was detected. We will run our analysis with a conservative subset of the data: Only windows where PAICc is <= 0.05 (i.e. where the probability that the observed AICc result is drawn from the distribution of randomised data is <= 5%). We exclude 'short windows' (<= 14 days) as we consider these likely statistical artefacts.
+
+```{r}
+
+Consv <- filter(model_data, PAIC_dbl <= 0.05 & Duration > 14)
+
+message(paste0("The conservative subset includes ", nrow(Consv), " datapoints, or, ", round((nrow(Consv)/nrow(model_data))*100, 2), "% of the data \n \n"))
+
+message(paste0("The conservative subset includes ", length(unique(Consv$Pop_ID)), " populations, or, ", round(length(unique(Consv$Pop_ID))/length(unique(model_data$Pop_ID))*100, 2), "% of total populations"))
+
+```
+
+Plot relationship between temperature window significance and the sample size (number of years) (Fig. S2)
+
+```{r, fig.height=5, fig.width=4}
+
+summary_data <- climate_sensitivity_and_exposure
+
+#Create a measure of midpoint which is in Julian days (i.e. values should get smaller as they get earlier)
+summary_data <- summary_data %>%
+  #Turn midpoint into Julian date and create Pop_sp
+  dplyr::rowwise() %>% 
+  dplyr::mutate(WindowOpen_Julian = 153 - WindowOpen,
+                WindowClose_Julian = 153 - WindowClose,
+                Midpoint_Julian = 153 - mean(c(WindowOpen, WindowClose)),
+                Duration = WindowOpen - WindowClose,
+                Delay = WindowOpen_Julian - mean_LD,
+                Pop_sp = paste(Pop_ID, Species, sep = "_"))
+
+#Make PAIC numeric to allow for subsetting
+summary_data <- summary_data %>%
+  mutate(PAIC = purrr::map_dbl(.x = PAIC, .f = ~ifelse(.x == "<0.001", 0.001, as.numeric(.x))),
+         Sig_0.05 = ifelse(round(PAIC, 2) <= 0.05 & Duration > 14, "\n Significant", "Not \n Significant"))
+
+(Plot_0.05 <- ggplot(summary_data, aes(x = as.factor(Sig_0.05), y = sample.size))+
+    geom_boxplot(width = 0.5, size = 1) +
+    xlab("") +
+    ylab("Number of years") +
+    coord_flip() +
+    scale_y_continuous(breaks = seq(0, 70, 10))+
+    theme_classic(base_size = 16, base_family = "sans") +
+    theme(axis.title.y = element_text(size = 20),
+          axis.text.y = element_text(size = 15, angle = 90,
+                                     hjust = 0.5, vjust = 1),
+          plot.margin = margin(t = 5, b = 5, l = 5, r = 20)))
+
+ggplot2::ggsave(filename = here::here("plots/Significant_samplesize_FigS2.pdf"), Plot_0.05, height = 7, width = 10, units = "in", dpi = 300)
+
+#Vector graphic can be resized as required for journal specifications
+ggplot2::ggsave(filename = here::here("plots/Significant_samplesize_FigS2.pdf"), Plot_0.05, height = 7, width = 10, units = "in")
+
+```
+
+-----
+
+##Midpoint
+
+First we test for any interaction with species
+
+```{r}
+
+midpoint_latitude <- fitme(Midpoint_Julian ~ Latitude*Species + Longitude*Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+```
+
+Check model assumptions
+
+*Heteroskedasticity*
+
+```{r, fig.width = 5, fig.height = 4}
+
+resid  <- residuals(midpoint_latitude, type = "pearson")
+fitted <- fitted(midpoint_latitude)
+
+ggplot() +
+  geom_point(aes(x = fitted, y = resid), shape = 21, size = 3) +
+  geom_hline(yintercept = 0, lty = 2) +
+  theme_classic()
+
+```
+
+Potentially some heterogeneity of variance...but not too bad. We will leave it.
+
+*Normality of residuals*
+
+```{r, fig.width = 5, fig.height = 4}
+
+qqnorm(residuals(midpoint_latitude, type = "response"))
+qqline(residuals(midpoint_latitude, type = "response"))
+
+```
+
+No violation of normality of model residuals.
+
+*Check linearity of relationships w/ predictors*
+
+```{r, fig.width = 10, fig.height = 4}
+
+library(patchwork)
+plot1 <- ggplot(data = NULL, aes(x = Consv$Latitude, y = residuals(midpoint_latitude, type = "pearson"))) + geom_point() +geom_smooth()
+plot2 <- ggplot(data = NULL, aes(x = Consv$Longitude, y = residuals(midpoint_latitude, type = "pearson"))) + geom_point() +geom_smooth()
+
+plot1 + plot2
+
+```
+
+All assumptions seem fine. Now create a more simple model and use likelihood ratio test to compare interaction v. non-interaction
+
+```{r}
+
+simple_mod_MP <- fitme(Midpoint_Julian ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+anova(midpoint_latitude, simple_mod_MP, test = "LRT")
+
+```
+
+Model with interaction is not significantly better than that without.
+
+```{r, fig.width = 5, fig.height = 4, eval = FALSE}
+
+CIs <- confint_2levels(mod = midpoint_latitude, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+ggplot(subset(CIs, Variable == "Latitude:SpeciesGT" | Variable == "SpeciesGT:Longitude")) +
+  geom_hline(yintercept = 0, lty = 2, size = 1) +
+  geom_errorbar(aes(x = Variable, ymin = lower, ymax = upper), width = 0, size = 1)+
+  geom_point(aes(x = Variable, y = est), shape = 21, fill = "dark grey", size = 3)+
+  theme_classic()+
+  xlab("")+
+  ylab("Parameter estimate")+
+  labs("Parameter estimate +- SE for latitude:longitude interaction")+
+  labs(title = "Parametric bootstrap")
+
+```
+
+Generate model table for the full model with interactions.
+
+```{r, eval = FALSE}
+
+CIs %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+Possibly a slight difference in midpoint change with latitude, but interaction term was not significant so we will remove it.
+
+```{r}
+
+summary(simple_mod_MP)
+
+```
+
+Refit model with lmer to determine VIF and test for multi-collinearity.
+
+```{r}
+
+lme4::lmer(Midpoint_Julian ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv) %>% 
+  car::vif()
+
+```
+
+Additional multi-collinearity investigation to make sure that VIF is reliable. Firstly, we can just check that there is no major relationship between any of our variables. We can use correlation coefficient for continuous variables, or fit models to look at relationships with categories.
+
+```{r}
+
+#Mixed forests tend to be at higher latitude than deciduous...but DEC v EVE is not significant
+lm(Latitude ~ Habitat_Type, data = Consv %>% distinct(Pop_ID, Habitat_Type, Latitude)) %>% 
+  summary()
+
+```
+
+```{r}
+
+#EVE and MIX both tend to be further east than deciduous...
+lm(Longitude ~ Habitat_Type, data = Consv %>% distinct(Pop_ID, Habitat_Type, Longitude)) %>% 
+  summary()
+
+```
+
+```{r}
+
+#No difference in species mix
+glm(as.numeric(as.factor(Species)) - 1 ~ Habitat_Type, data = Consv, family = "binomial") %>% 
+  summary()
+
+```
+
+```{r}
+
+#No latitude bias in species
+lm(Latitude ~ Species, data = Consv) %>% 
+  summary()
+
+```
+
+```{r}
+
+#No longitude bias in species
+lm(Longitude ~ Species, data = Consv) %>% 
+  summary()
+
+```
+
+```{r}
+
+#Our data tends to show a diagonal pattern (i.e. more easterly are also more northerly)
+lm(Longitude ~ Latitude, data = Consv) %>% 
+  summary()
+
+```
+
+Suggested by Alex and online, we can also look at type I anova (i.e. factors added sequentially to base model) to type II anova (i.e. each factor removed from the full model). If there is no major collinearity, these should give similar conclusions.
+
+type I
+
+```{r, eval = FALSE}
+
+empty_mod <- fitme(Midpoint_Julian ~ 1 + (1|Pop_ID), data = Consv)
+
+base_mod <- fitme(Midpoint_Julian ~ Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Habitat Type is not significant
+#Need to do this with bootstraps
+baseLRT_MP <- LRT(empty_mod, base_mod, boot.repl = 500, nb_cores = 4)
+baseLRT_MP$rawBootLRT$mod <- "base"
+
+next_mod <- fitme(Midpoint_Julian ~ Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Species IS significant
+nextLRT_MP <- LRT(base_mod, next_mod, boot.repl = 500, nb_cores = 4)
+nextLRT_MP$rawBootLRT$mod <- "next"
+
+next_mod2 <- fitme(Midpoint_Julian ~ Latitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Latitude IS significant
+next2LRT_MP <- LRT(next_mod, next_mod2, boot.repl = 500, nb_cores = 4)
+next2LRT_MP$rawBootLRT$mod <- "next2"
+
+full_mod <- fitme(Midpoint_Julian ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Longitude is not significant
+fullLRT_MP <- LRT(next_mod2, full_mod, boot.repl = 500, nb_cores = 4)
+fullLRT_MP$rawBootLRT$mod <- "next2"
+
+all_test <- baseLRT_MP$rawBootLRT %>% 
+  bind_rows(nextLRT_MP$rawBootLRT) %>% 
+  bind_rows(next2LRT_MP$rawBootLRT) %>% 
+  bind_rows(fullLRT_MP$rawBootLRT)
+
+all_test
+
+```
+
+type II
+
+```{r, eval = FALSE}
+
+set.seed(123)
+
+full_mod <- fitme(Midpoint_Julian ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+noHabitat <- fitme(Midpoint_Julian ~ Latitude + Longitude + Species + (1|Pop_ID), data = Consv)
+
+#Removing habitat type is not significant
+noHabitatLRT_MP <- LRT(full_mod, noHabitat, boot.repl = 500, nb_cores = 4)
+noHabitatLRT_MP$rawBootLRT$variable <- "Habitat"
+
+noSpecies <- fitme(Midpoint_Julian ~ Latitude + Longitude + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Removing species IS significant
+noSpeciesLRT_MP <- LRT(full_mod, noSpecies, boot.repl = 500, nb_cores = 4)
+noSpeciesLRT_MP$rawBootLRT$variable <- "Species"
+
+noLat <- fitme(Midpoint_Julian ~ Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Removing Latitude IS significant
+noLatLRT_MP <- LRT(full_mod, noLat, boot.repl = 500, nb_cores = 4)
+noLatLRT_MP$rawBootLRT$variable <- "Lat"
+
+noLong <- fitme(Midpoint_Julian ~ Latitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Removing longitude is not significant
+noLongLRT_MP <- LRT(full_mod, noLong, boot.repl = 500, nb_cores = 4)
+noLongLRT_MP$rawBootLRT$variable <- "Long"
+
+all_test <- noHabitatLRT_MP$rawBootLRT %>% 
+  bind_rows(noSpeciesLRT_MP$rawBootLRT) %>% 
+  bind_rows(noLatLRT_MP$rawBootLRT) %>% 
+  bind_rows(noLongLRT_MP$rawBootLRT)
+
+all_test
+
+```
+
+Type I v. type II anova gives the same conclusions.
+
+```{r, eval = FALSE}
+
+confint_2levels(mod = simple_mod_MP, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123)) %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+Basic summary:
+
+- Midpoint increases with latitude but does not change with longitude
+- Great tits tend to have later windows than blue tits
+- Evergreen habitats show later windows than deciduous
+
+----
+
+## Duration
+
+Next, run analysis to study relationship between window duration and spatial scale
+
+First we test for any interaction with species
+
+```{r}
+
+duration_latitude <- fitme(Duration ~ Latitude*Species + Longitude*Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+```
+
+Check model assumptions
+
+*Heteroskedasticity*
+
+```{r, fig.width = 5, fig.height = 4}
+
+resid  <- residuals(duration_latitude, type = "pearson")
+fitted <- fitted(duration_latitude)
+
+ggplot() +
+  geom_point(aes(x = fitted, y = resid), shape = 21, size = 3) +
+  geom_hline(yintercept = 0, lty = 2) +
+  theme_classic()
+
+```
+
+No issues of heteroskedasticity
+
+*Normality of residuals*
+
+```{r, fig.width = 5, fig.height = 4}
+
+qqnorm(residuals(duration_latitude, type = "response"))
+qqline(residuals(duration_latitude, type = "response"))
+
+```
+
+No violation of normality of model residuals.
+
+*Check linearity of relationships w/ predictors*
+
+```{r, fig.width = 10, fig.height = 4}
+
+plot1 <- ggplot(data = NULL, aes(x = Consv$Latitude, y = residuals(duration_latitude, type = "pearson"))) + geom_point() +geom_smooth()
+plot2 <- ggplot(data = NULL, aes(x = Consv$Longitude, y = residuals(duration_latitude, type = "pearson"))) + geom_point() +geom_smooth()
+
+plot1 + plot2
+
+```
+
+All assumptions seem fine. Now create a more simple model and use likelihood ratio test to compare interaction v. non-interaction
+
+```{r}
+
+simple_mod_DU <- fitme(Duration ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+anova(duration_latitude, simple_mod_DU, test = "LRT")
+
+```
+
+There is no evidence for an interaction in duration
+
+```{r, fig.width = 5, fig.height = 4, eval = FALSE}
+
+CIs <- confint_2levels(mod = duration_latitude, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+ggplot(subset(CIs, Variable == "Latitude:SpeciesGT" | Variable == "SpeciesGT:Longitude")) +
+  geom_hline(yintercept = 0, lty = 2, size = 1) +
+  geom_errorbar(aes(x = Variable, ymin = lower, ymax = upper), width = 0, size = 1)+
+  geom_point(aes(x = Variable, y = est), shape = 21, fill = "dark grey", size = 3)+
+  theme_classic()+
+  xlab("")+
+  ylab("Parameter estimate")+
+  labs("Parameter estimate +- SE for latitude:longitude interaction")+
+  labs(title = "Parametric bootstrap")
+
+```
+
+Generate model table for the full model with interactions.
+
+```{r, eval = FALSE}
+
+CIs %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+```{r}
+
+summary(simple_mod_DU)
+
+```
+
+Refit model with lmer to determine VIF and test for multi-collinearity.
+
+```{r}
+
+lme4::lmer(Duration ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv) %>% 
+  car::vif()
+
+```
+
+Suggested by Alex and online, we can also look at type I anova (i.e. factors added sequentially to base model) to type II anova (i.e. each factor removed from the full model). If there is no major collinearity, these should give similar conclusions.
+
+type I
+
+```{r, eval = FALSE}
+
+empty_mod <- fitme(Duration ~ 1 + (1|Pop_ID), data = Consv)
+
+base_mod <- fitme(Duration ~ Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Habitat Type is not significant
+baseLRT_DU <- LRT(empty_mod, base_mod, boot.repl = 500, nb_cores = 4)
+baseLRT_DU$rawBootLRT$mod <- "base"
+
+next_mod <- fitme(Duration ~ Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Species is not significant
+nextLRT_DU <- LRT(base_mod, next_mod, boot.repl = 500, nb_cores = 4)
+nextLRT_DU$rawBootLRT$mod <- "next"
+
+next_mod2 <- fitme(Duration ~ Latitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Latitude is not significant
+next2LRT_DU <- LRT(next_mod, next_mod2, boot.repl = 500, nb_cores = 4)
+next2LRT_DU$rawBootLRT$mod <- "next2"
+
+full_mod <- fitme(Duration ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Longitude is not significant
+fullLRT_DU <- LRT(next_mod2, full_mod, boot.repl = 500, nb_cores = 4)
+fullLRT_DU$rawBootLRT$mod <- "next2"
+
+all_test <- baseLRT_DU$rawBootLRT %>% 
+  bind_rows(nextLRT_DU$rawBootLRT) %>% 
+  bind_rows(next2LRT_DU$rawBootLRT) %>% 
+  bind_rows(fullLRT_DU$rawBootLRT)
+
+all_test
+
+```
+
+type II
+
+```{r, eval = FALSE}
+
+set.seed(123)
+
+full_mod <- fitme(Duration ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+noHabitat <- fitme(Duration ~ Latitude + Longitude + Species + (1|Pop_ID), data = Consv)
+
+#Removing habitat type is not significant
+noHabitatLRT_DU <- LRT(full_mod, noHabitat, boot.repl = 500, nb_cores = 4)
+noHabitatLRT_DU$rawBootLRT$variable <- "Habitat"
+
+noSpecies <- fitme(Duration ~ Latitude + Longitude + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Removing species is not significant
+noSpeciesLRT_DU <- LRT(full_mod, noSpecies, boot.repl = 500, nb_cores = 4)
+noSpeciesLRT_DU$rawBootLRT$variable <- "Species"
+
+noLat <- fitme(Duration ~ Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Removing Latitude is not significant
+noLatLRT_DU <- LRT(full_mod, noLat, boot.repl = 500, nb_cores = 4)
+noLatLRT_DU$rawBootLRT$variable <- "Lat"
+
+noLong <- fitme(Duration ~ Latitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Removing longitude is not significant
+noLongLRT_DU <- LRT(full_mod, noLong, boot.repl = 500, nb_cores = 4)
+noLongLRT_DU$rawBootLRT$variable <- "Long"
+
+all_test <- noHabitatLRT_DU$rawBootLRT %>% 
+  bind_rows(noSpeciesLRT_DU$rawBootLRT) %>% 
+  bind_rows(noLatLRT_DU$rawBootLRT) %>% 
+  bind_rows(noLongLRT_DU$rawBootLRT)
+
+all_test
+
+```
+
+Although there is some relationship between variables, our type I v. type II conclusions are the same. Suggests these relationships are not important to our conclusions.
+
+```{r, eval = FALSE}
+
+confint_2levels(mod = simple_mod_DU, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123)) %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+Basic summary:
+
+- No evidence of any variation in window duration with latitude or longitude.
+
+## Delay
+
+Finally, run analysis to study relationship between window delay (i.e. difference between mean laying date and window start) and spatial scale
+
+First we test for any interaction with species
+
+```{r}
+
+delay_latitude <- fitme(Delay ~ Latitude*Species + Longitude*Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+```
+
+Check model assumptions
+
+*Heteroskedasticity*
+
+```{r, fig.width = 5, fig.height = 4}
+
+resid  <- residuals(delay_latitude, type = "pearson")
+fitted <- fitted(delay_latitude)
+
+ggplot() +
+  geom_point(aes(x = fitted, y = resid), shape = 21, size = 3) +
+  geom_hline(yintercept = 0, lty = 2) +
+  theme_classic()
+
+```
+
+Maybe some pattern, but not too bad. We will continue.
+
+*Normality of residuals*
+
+```{r, fig.width = 5, fig.height = 4}
+
+qqnorm(residuals(delay_latitude, type = "response"))
+qqline(residuals(delay_latitude, type = "response"))
+
+```
+
+No violation of normality of model residuals.
+
+*Check linearity of relationships w/ predictors*
+
+```{r, fig.width = 10, fig.height = 4}
+
+library(patchwork)
+plot1 <- ggplot(data = NULL, aes(x = Consv$Latitude, y = residuals(delay_latitude, type = "pearson"))) + geom_point() +geom_smooth()
+plot2 <- ggplot(data = NULL, aes(x = Consv$Longitude, y = residuals(delay_latitude, type = "pearson"))) + geom_point() +geom_smooth()
+
+plot1 + plot2
+
+```
+
+All assumptions seem fine. Now create a more simple model and use likelihood ratio test to compare interaction v. non-interaction
+
+```{r}
+
+simple_mod_DE <- fitme(Delay ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+anova(delay_latitude, simple_mod_DE, test = "LRT")
+
+```
+
+There is no evidence for an interaction in duration
+
+```{r, fig.width = 5, fig.height = 4, eval = FALSE}
+
+CIs <- confint_2levels(mod = delay_latitude, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123))
+
+ggplot(subset(CIs, Variable == "Latitude:SpeciesGT" | Variable == "SpeciesGT:Longitude")) +
+  geom_hline(yintercept = 0, lty = 2, size = 1) +
+  geom_errorbar(aes(x = Variable, ymin = lower, ymax = upper), width = 0, size = 1)+
+  geom_point(aes(x = Variable, y = est), shape = 21, fill = "dark grey", size = 3)+
+  theme_classic()+
+  xlab("")+
+  ylab("Parameter estimate")+
+  labs("Parameter estimate +- SE for latitude:longitude interaction")+
+  labs(title = "Parametric bootstrap")
+
+```
+
+Generate model table for the full model with interactions.
+
+```{r, eval = FALSE}
+
+CIs %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+```{r}
+
+summary(simple_mod_DE)
+
+```
+
+Refit model with lmer to determine VIF and test for multi-collinearity.
+
+```{r}
+
+lme4::lmer(Delay ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv) %>% 
+  car::vif()
+
+```
+
+Suggested by Alex and online, we can also look at type I anova (i.e. factors added sequentially to base model) to type II anova (i.e. each factor removed from the full model). If there is no major collinearity, these should give similar conclusions.
+
+type I
+
+```{r, eval = FALSE}
+
+empty_mod <- fitme(Delay ~ 1 + (1|Pop_ID), data = Consv)
+
+base_mod <- fitme(Delay ~ Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Habitat Type is not significant
+#Need to do this with bootstraps
+baseLRT <- LRT(empty_mod, base_mod, boot.repl = 500, nb_cores = 4)
+baseLRT$rawBootLRT$mod <- "base"
+
+next_mod <- fitme(Delay ~ Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Species is not significant
+nextLRT <- LRT(base_mod, next_mod, boot.repl = 500, nb_cores = 4)
+nextLRT$rawBootLRT$mod <- "next"
+
+next_mod2 <- fitme(Delay ~ Latitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Latitude IS significant
+next2LRT <- LRT(next_mod, next_mod2, boot.repl = 500, nb_cores = 4)
+next2LRT$rawBootLRT$mod <- "next2"
+
+full_mod <- fitme(Delay ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Adding Longitude is not significant
+fullLRT <- LRT(next_mod2, full_mod, boot.repl = 500, nb_cores = 4)
+fullLRT$rawBootLRT$mod <- "next2"
+
+all_test <- baseLRT$rawBootLRT %>% 
+  bind_rows(nextLRT$rawBootLRT) %>% 
+  bind_rows(next2LRT$rawBootLRT) %>% 
+  bind_rows(fullLRT$rawBootLRT)
+
+all_test
+
+```
+
+type II
+
+```{r, eval = FALSE}
+
+set.seed(123)
+
+full_mod <- fitme(Delay ~ Latitude + Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+noHabitat <- fitme(Delay ~ Latitude + Longitude + Species + (1|Pop_ID), data = Consv)
+
+#Removing habitat type is not significant
+noHabitatLRT <- LRT(full_mod, noHabitat, boot.repl = 500, nb_cores = 4)
+noHabitatLRT$rawBootLRT$variable <- "Habitat"
+
+noSpecies <- fitme(Delay ~ Latitude + Longitude + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Removing species is not significant
+noSpeciesLRT <- LRT(full_mod, noSpecies, boot.repl = 500, nb_cores = 4)
+noSpeciesLRT$rawBootLRT$variable <- "Species"
+
+noLat <- fitme(Delay ~ Longitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Removing Latitude is not significant
+noLatLRT <- LRT(full_mod, noLat, boot.repl = 500, nb_cores = 4)
+noLatLRT$rawBootLRT$variable <- "Lat"
+
+noLong <- fitme(Delay ~ Latitude + Species + Habitat_Type + (1|Pop_ID), data = Consv)
+
+#Removing longitude is not significant
+noLongLRT <- LRT(full_mod, noLong, boot.repl = 500, nb_cores = 4)
+noLongLRT$rawBootLRT$variable <- "Long"
+
+all_test <- noHabitatLRT$rawBootLRT %>% 
+  bind_rows(noSpeciesLRT$rawBootLRT) %>% 
+  bind_rows(noLatLRT$rawBootLRT) %>% 
+  bind_rows(noLongLRT$rawBootLRT)
+
+all_test
+
+```
+
+There is potentially some issue here that multi-collinearity is affecting our conclusions about latitude effects on delay. Need to consider how we move forward here. 
+
+```{r, eval = FALSE}
+
+confint_2levels(mod = simple_mod_DE, model_type = "spaMM", boot_args = list(nb_cores = 8, nsim = 1000, seed = 123)) %>%
+  dplyr::mutate(beta_wCI = paste0(round(est, 3), " [", round(lower, 3), " / ", round(upper, 3), "]")) %>%
+  dplyr::select(Variable, beta_wCI) %>%
+  dplyr::filter(!Variable %in% c(".sig01", ".sigma")) %>%
+  dplyr::rename(`Model estimate [95% confidence interval]` = beta_wCI) %>%
+  kable() %>%
+  kable_styling("condensed") %>%
+  row_spec(0, bold = T, color = "black", background = "#D3D3D3")
+
+```
+
+Basic summary:
+
+- No evidence of any consistent variation in window delay with latitude.
+- Some evidence of variation with longitude
+
+## Plot model results
+
+### Main figure: Show latitudinal patterns and habitat type effect (Fig. 3)
+
+Relevel habitat type
+
+```{r}
+
+Consv$Habitat_Type <- forcats::fct_relevel(Consv$Habitat_Type, "DEC", "MIX", "EVE")
+
+```
+
+```{r, fig.width = 10, fig.height = 4}
+
+pts <- Consv %>% 
+  dplyr::select(Species, Latitude, Midpoint_Julian, mean_LD_Julian) %>% 
+  tidyr::pivot_longer(cols = c("Midpoint_Julian", "mean_LD_Julian")) %>% 
+  #Use a non-leapyear to calcualte ordinal date
+  #Minus 1, because Julian date of 1 = Jan 1st
+  dplyr::mutate(value = as.Date("2014-01-01") + value - 1)
+
+error_bar <- Consv %>% 
+  dplyr::mutate(Midpoint = as.Date("2014-01-01") + Midpoint_Julian - 1,
+                WindowOpen = as.Date("2014-01-01") + WindowOpen_Julian - 1,
+                WindowClose = as.Date("2014-01-01") + WindowClose_Julian - 1)
+
+ylims = c(as.Date("2014-01-01") + 19, as.Date("2014-01-01") + 159)
+xlims = c(39, 71)
+
+Latitude_all <- ggplot() +
+  geom_smooth(data = pts, aes(x = Latitude, y = value, colour = name),
+              lty = 2, size = 1, method = "lm", se = FALSE) + 
+  geom_errorbar(data = error_bar, aes(x = Latitude, ymin = WindowOpen, ymax = WindowClose, group = Species),
+                size = 1, alpha = 0.8, position = position_dodge(width = 2), width = 0) +
+  #Add mean and midpoint
+  geom_point(data = pts,
+             aes(x = Latitude, y = value, shape = Species, group = Species, fill = name),
+             size = 3, stroke = 1, position = position_dodge(width = 2)) +
+  xlab("Latitude") +
+  ylab("") +
+  scale_shape_manual(values = c(21, 24), labels = c("C. caeruleus", "P. major")) +
+  scale_fill_manual(values = c("#A29C9B", "#56494E"), labels = c("Mean lay date",
+                                                                 "Window midpoint"),
+                    name = "Values") +
+  scale_colour_manual(values = c("#A29C9B", "#56494E"), labels = c("Mean lay date",
+                                                                   "Window midpoint"),
+                      name = "Values") +
+  scale_y_date(limits = ylims, date_labels = "%b") +
+  scale_x_continuous(limits = xlims) +
+  guides(colour = guide_legend(override.aes = list(size = 3, shape = 21, stroke = 1, lty = NA)),
+         shape = guide_legend(label.theme = element_text(family = "sans", face = "italic"))) +
+  theme_classic(base_family = "sans", base_size = 15) +
+  theme(legend.position = c(1.125, 0.5),
+        legend.box = "vertical",
+        legend.direction = "vertical",
+        legend.justification = "center",
+        legend.background = element_rect(fill = "white", colour = "black"),
+        axis.text = element_text(size = 12, colour = "black"),
+        axis.text.y = element_text(vjust = 0.25),
+        axis.title = element_text(size = 15),
+        plot.margin = margin(t = 5, b = 5, l = 10, r = 150))
+
+ggsave(filename = here::here("plots/Latitude_LD_window_Fig3a.png"), width = 8.5, height = 7, dpi = 600)
+
+ggsave(filename = here::here("plots/Latitude_LD_window_Fig3a.jpeg"), width = 8.5, height = 7, dpi = 600)
+
+ggsave(filename = here::here("plots/Latitude_LD_window_Fig3a.pdf"), width = 8.5, height = 7)
+
+```
+
+```{r}
+
+ylims_habitat = c(as.Date("2014-01-01") + 59 - 1, as.Date("2014-01-01") + 130 - 1)
+
+Habitat_effect <- ggplot()+
+  bailey2021:::geom_flat_violin(data = error_bar, aes(x = Habitat_Type, y = Midpoint, fill = Habitat_Type), alpha = 0.75, colour = "black",
+                                position = position_nudge(x = 0.02), width = 0.75) +
+  geom_boxplot(data = error_bar, aes(x = Habitat_Type, y = Midpoint), width = 0.1, size = 1) +
+  scale_y_date(name = "Window midpoint", limits = ylims_habitat) +
+  scale_x_discrete(name = "", labels = c("Deciduous", "Mixed", "Evergreen")) +
+  #Colour-blind friendly palette
+  scale_fill_manual(values = friendly_palette, name = "Habitat Type",
+                    guide = FALSE) + 
+  #Original palette
+  # scale_fill_manual(values = c("#CA3C25", "#33658A", "#4C9F70"), name = "Habitat Type",
+  #                   guide = FALSE) +
+  guides(colour = guide_legend(override.aes = list(size = 3, shape = 21, stroke = 1, lty = NA))) +
+  theme_classic(base_family = "sans", base_size = 15) +
+  theme(legend.position = "none",
+        axis.text = element_text(size = 12, colour = "black"),
+        axis.title = element_text(size = 15),
+        plot.margin = margin(t = 5, b = 5, l = 10, r = 15))
+
+ggplot2::ggsave(filename = here::here("plots/Habitat_Type_MP_Fig3b.png"), width = 8.5, height = 7, dpi = 600)
+
+ggplot2::ggsave(filename = here::here("plots/Habitat_Type_MP_Fig3b.jpeg"), width = 8.5, height = 7, dpi = 600)
+
+ggplot2::ggsave(filename = here::here("plots/Habitat_Type_MP_Fig3b.pdf"), width = 8.5, height = 7)
+
+```
+
+```{r, fig.width = 10, fig.height = 4}
+
+Latitude_all + Habitat_effect + plot_annotation(tag_levels = 'A', tag_suffix = ")")
+
+ggplot2::ggsave(filename = here::here("plots/Latitude_Habitat_MP_Fig3.png"), width = 17, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Latitude_Habitat_MP_Fig3.jpeg"), width = 17, height = 7, dpi = 300)
+
+ggplot2::ggsave(filename = here::here("plots/Latitude_Habitat_MP_Fig3.pdf"), width = 17, height = 7)
+
+```
+
+### Supp figure: Latitude effect on each  (Fig. S3)
+
+```{r, fig.width = 15, fig.height = 4}
+
+newdat <- tidyr::expand_grid(Species = "GT", Longitude = mean(Consv$Longitude),
+                             Latitude = seq(min(Consv$Latitude), max(Consv$Latitude), length.out = 100),
+                             Habitat_Type = factor(c("DEC", "MIX", "EVE"), levels = c("DEC", "MIX", "EVE")), Pop_ID = "X") %>% 
+  dplyr::mutate(Species_full = dplyr::recode(Species,BT = "C.caeruleus", GT = "P.major"))
+
+newdat_MP <- newdat %>% 
+  #Get prediction and 95% prediction intervals
+  mutate(fit = as.numeric(predict(simple_mod_MP, .)),
+         as_tibble(get_intervals(simple_mod_MP, .))) %>% 
+  rename(lwr = predVar_0.025, upr = predVar_0.975) %>% 
+  dplyr::mutate(across(.cols = fit:upr, .fns = ~ as.Date("2014-01-01") + .x - 1))
+
+midpoint_dat <- Consv %>% 
+  mutate(Midpoint = as.Date("2014-01-01") + Midpoint_Julian - 1)
+
+xlim <- c(39, 72)
+ylim_MP <- c(as.Date("2014-01-01") + 49, as.Date("2014-01-01") + 149)
+
+Lat_effect_MP <- ggplot()+
+  geom_ribbon(data = newdat_MP, aes(x = Latitude, ymin = lwr, ymax = upr, fill = Habitat_Type), alpha = 0.5) + 
+  geom_point(data = midpoint_dat, aes(x = Latitude, y = Midpoint, shape = Species), fill = "dark grey", size = 3, stroke = 1) +
+  scale_shape_manual(values = c(21, 24)) +
+  geom_line(data = newdat_MP, aes(x = Latitude, y = fit, lty = Habitat_Type), size = 1) +
+  #Colour-blind friendly palette
+  scale_fill_manual(values = friendly_palette) + 
+  #Original palette
+  # scale_fill_manual(values = c("#CA3C25", "#33658A", "#4C9F70")) +
+  scale_x_continuous(limits = xlim) +
+  scale_y_date(limits = ylim_MP) +
+  theme_classic(base_family = "sans", base_size = 15) +
+  theme(legend.position = "none", 
+        axis.text = element_text(size = 12, colour = "black"),
+        axis.title = element_text(size = 15),
+        plot.margin = margin(l = 150)) +
+  xlab("Latitude") +
+  ylab("Midpoint")
+
+newdat_DU <- newdat %>% 
+  #Get prediction and 95% prediction intervals
+  mutate(fit = as.numeric(predict(simple_mod_DU, .)),
+         as_tibble(get_intervals(simple_mod_DU, .))) %>% 
+  rename(lwr = predVar_0.025, upr = predVar_0.975)
+
+ylim_DU <- c(10, 110)
+Lat_effect_DU <- ggplot()+
+  geom_ribbon(data = newdat_DU, aes(x = Latitude, ymin = lwr, ymax = upr, fill = Habitat_Type), alpha = 0.5)+
+  geom_point(data = Consv, aes(x = Latitude, y = Duration, shape = Species), fill = "dark grey", size = 3, stroke = 1)+
+  scale_shape_manual(values = c(21, 24))+
+  geom_line(data = newdat_DU, aes(x = Latitude, y = fit, lty = Habitat_Type), size = 1)+
+  #Colour-blind friendly palette
+  scale_fill_manual(values = friendly_palette) + 
+  #Original palette
+  # scale_fill_manual(values = c("#CA3C25", "#33658A", "#4C9F70")) +
+  scale_x_continuous(limits = xlim)+
+  scale_y_continuous(limits = ylim_DU) +
+  theme_classic(base_family = "sans", base_size = 15) +
+  theme(legend.position = "none", 
+        axis.text = element_text(size = 12, colour = "black"),
+        axis.title = element_text(size = 15),
+        plot.margin = margin(l = 75, r = 75)) +
+  xlab("Latitude")+
+  ylab("Duration (days)")
+
+newdat_DE <- newdat %>% 
+  #Get prediction and 95% prediction intervals
+  mutate(fit = as.numeric(predict(simple_mod_DE, .)),
+         as_tibble(get_intervals(simple_mod_DE, .))) %>% 
+  rename(lwr = predVar_0.025, upr = predVar_0.975)
+
+ylim_DE <- c(5, 42)
+Lat_effect_DE <- ggplot()+
+  geom_ribbon(data = newdat_DE, aes(x = Latitude, ymin = lwr, ymax = upr, fill = Habitat_Type), alpha = 0.5)+
+  geom_point(data = Consv, aes(x = Latitude, y = Delay, shape = Species), fill = "dark grey", size = 3, stroke = 1)+
+  scale_shape_manual(values = c(21, 24),
+                     labels = c("C. caeruleus", "P. major"))+
+  geom_line(data = newdat_DE, aes(x = Latitude, y = fit, lty = Habitat_Type), size = 1)+
+    #Colour-blind friendly palette
+  scale_fill_manual(values = friendly_palette,
+                    name = "Habitat Type",
+                    labels = c("Deciduous", "Mixed", "Evergreen")) +
+  #Original palette
+  # scale_fill_manual(values = c("#CA3C25", "#33658A", "#4C9F70"),
+  # name = "Habitat Type",
+  # labels = c("Deciduous", "Mixed", "Evergreen")) +
+  scale_linetype_discrete(name = "Habitat Type",
+                          labels = c("Deciduous", "Mixed", "Evergreen")) +
+  scale_x_continuous(limits = xlim)+
+  scale_y_continuous(limits = ylim_DE) +
+  xlab("Latitude")+
+  ylab("Delay (days)") +
+  theme_classic(base_family = "sans", base_size = 15) +
+  theme(legend.position = c(1.125, 0.5),
+        legend.box = "vertical",
+        legend.direction = "vertical",
+        legend.background = element_rect(fill = "white", colour = "black"),
+        axis.text = element_text(size = 12, colour = "black"),
+        axis.title = element_text(size = 15),
+        plot.margin = margin(r = 150)) +
+  guides(shape = guide_legend(label.theme = element_text(family = "sans", face = "italic")))
+
+Lat_effect_MP + Lat_effect_DU + Lat_effect_DE + plot_annotation(tag_levels = 'A', tag_suffix = ")")
+
+ggplot2::ggsave(filename = here::here("plots/Latitude_effect_FigS3.png"), width = 25.5, height = 7, dpi = 600)
+
+ggplot2::ggsave(filename = here::here("plots/Latitude_effect_FigS3.jpeg"), width = 25.5, height = 7, dpi = 600)
+
+ggplot2::ggsave(filename = here::here("plots/Latitude_effect_FigS3.pdf"), width = 25.5, height = 7)
+
+```
+
+To answer numerous questions, it's worth reporting the mean and range of delays.
+
+```{r}
+
+print(mean(Consv$Delay))
+
+print(range(Consv$Delay))
+
+```
